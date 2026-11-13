@@ -14,24 +14,21 @@ import (
 )
 
 func checkpointSpanAttribute(span trace.Span, key attribute.Key) string {
-	// Tomislav-RetCtx: a bridge span with wire state keeps `_rc` there (reverseSpanState.rc,
-	// exported by appendBridgeWire), not on the span.
+	// A bridge span with wire state keeps `_rc` in the wire table, not on the span.
 	if w := bridgeWires.load(span.SpanContext().SpanID()); w != nil && key == backend.ReverseTrussCheckpointKey {
 		return backend.RetCtxFromText(w.rev.rc)
 	}
 	for _, attr := range span.(sdktrace.ReadOnlySpan).Attributes() {
 		if attr.Key == key {
 			if key == backend.ReverseTrussCheckpointKey {
-				// Tomislav-RetCtx: `_rc` is exported as text; tests compare reverse contexts
-				// in their in-process (raw) form.
+				// `_rc` is exported as text; the tests compare reverse contexts in their raw form.
 				return backend.RetCtxFromText(attr.Value.AsString())
 			}
 			return attr.Value.AsString()
 		}
 	}
-	// Tomislav-RetCtx: the ranged PB/CGPB window keeps `_br` / `_d` beside the span
-	// (wire_state.go) until OnEnd; report them in their former carrier encoding (base64 text;
-	// the baggage `_br` itself is raw bytes now: baggageBR below).
+	// Range-mode PB/CGPB keep `_br` and `_d` in the wire table until OnEnd; report them in the base64
+	// form the attributes use (the baggage `_br` itself is raw: see baggageBR).
 	if w := bridgeWires.load(span.SpanContext().SpanID()); w != nil {
 		switch key {
 		case AttrBR:
@@ -64,11 +61,10 @@ func exportedCheckpoint(t *testing.T, span *tracepb.Span) string {
 		}
 		switch attr.Key {
 		case backend.ReverseTrussCheckpointKey:
-			// Tomislav-RetCtx: vanilla exports `_rc` as text; compared in the in-process (raw) form.
+			// Vanilla exports `_rc` as text; compare the raw form.
 			checkpoint = backend.RetCtxFromText(attr.Value.GetStringValue())
 		case AttrBREmit:
-			// Tomislav-RetCtx (user 2026-10-29): a bridge span's reverse context is folded into
-			// its one `_br` attribute, raw (otlp_wire.go appendBridgeWireBytes / splitBR).
+			// A bridge span's reverse context is inside its `_br` attribute (splitBR).
 			rc, _, ok := splitBR(attr.Value.GetBytesValue())
 			if !ok {
 				t.Fatal("malformed _br")
@@ -100,8 +96,8 @@ func exportedEmit(t *testing.T, span *tracepb.Span) []byte {
 	return nil
 }
 
-// Tomislav-RetCtx: each live receiver uses its own trusses' TTLs, while an
-// original checkpoint consumes the whole bundle independently of those TTLs.
+// Each receiver applies its own trusses' TTLs, while a scheduled checkpoint absorbs the whole
+// bundle regardless of them.
 func TestSDKReceiverDecisionBeforeEnd(t *testing.T) {
 	t.Setenv("REVERSE_TRUSS", "on")
 	t.Setenv("RT_LEAF_REJECT", "1")

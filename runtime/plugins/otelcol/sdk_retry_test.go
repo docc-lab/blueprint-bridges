@@ -1,6 +1,6 @@
 package otelcol
 
-// Tomislav-RetCtx: tests for the SDK one-shot retry policy (sdk_retry.go).
+// Tests of the one-shot export retry (sdk_retry.go).
 
 import (
 	"errors"

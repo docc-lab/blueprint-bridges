@@ -11,8 +11,8 @@ import (
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 )
 
-// Tomislav-RetCtx: the refused-trace census dedups per trace, upgrades LP->HP with a second
-// record, and serves append-only records with a from offset.
+// The census dedups per trace, upgrades a trace from LP to HP with a second record, and serves
+// append-only records from an offset.
 func TestRefusedTraceIDsCensus(t *testing.T) {
 	saved := refusedIDs
 	refusedIDs = newRefusedTraceIDs(true)
@@ -55,8 +55,8 @@ func TestRefusedTraceIDsCensus(t *testing.T) {
 	}
 }
 
-// Tomislav-RetCtx (2026-09-24): memory stays bounded under sustained refusal; counts stay exact
-// within the dedup window; the per-ID log is off by default.
+// Memory stays bounded under sustained refusal, counts stay exact within the dedup window, and the
+// per-trace records are off by default.
 func TestRefusedTraceIDsBounded(t *testing.T) {
 	saved := refusedIDs
 	refusedIDs = newRefusedTraceIDs(false)
@@ -90,7 +90,7 @@ func TestRefusedTraceIDsBounded(t *testing.T) {
 	}
 }
 
-// Tomislav-RetCtx: with a record file, records are appended there (17 bytes each), not kept in memory.
+// With a record file, records are appended there (17 bytes each) rather than kept in memory.
 func TestRefusedTraceIDsFile(t *testing.T) {
 	saved := refusedIDs
 	defer func() { refusedIDs = saved }()
@@ -111,7 +111,7 @@ func TestRefusedTraceIDsFile(t *testing.T) {
 	}
 }
 
-// Tomislav-RetCtx: census off (the default): span counters only, no per-trace state, no records.
+// With the census off (the default): span counters only, no per-trace state, no records.
 func TestRefusedTraceIDsCensusOff(t *testing.T) {
 	saved := refusedIDs
 	defer func() { refusedIDs = saved }()

@@ -126,8 +126,7 @@ func TestEndGroupFallbacks(t *testing.T) {
 			t.Fatalf("%v/%d: decoded %v", tc.ends, tc.bound, ends)
 		}
 	}
-	// Tomislav-RetCtx: a zero ordinal (children count from 1) used to be packed plain; it is a broken
-	// invariant now (invariants.go).
+	// A zero ordinal (ordinals count from 1) is a broken invariant.
 	mustBreakInvariant(t, "zero ordinal", func() { packEndGroup(nil, []int{0, 1}, 4) })
 	// A group longer than its bound must not be decoded as Lehmer.
 	if _, _, ok := unpackEndGroup([]byte{5<<1 | 1, 0xFF}, 2); ok {
@@ -213,7 +212,7 @@ func TestStructuralBridgeFanOutTrusses(t *testing.T) {
 	// Three children start in order 1,2,3; child 2 ends before child 3 starts.
 	_, c1 := tracer.Start(sbChildContext(root, state), "c1", trace.WithSpanKind(trace.SpanKindClient))
 	_, c2 := tracer.Start(sbChildContext(root, state), "c2", trace.WithSpanKind(trace.SpanKindClient))
-	// Tomislav-RetCtx: the wire state is freed at OnEnd; read c2's payload first.
+	// The wire entry is freed at OnEnd; read c2's payload first.
 	c2Emit := checkpointSpanAttribute(c2, AttrBREmit)
 	c2.End()
 	state.mu.Lock()
@@ -282,7 +281,7 @@ func TestStructuralBridgeFanOutTrusses(t *testing.T) {
 	summary = binary.AppendUvarint(summary, 2)
 	summary = binary.AppendUvarint(summary, 2)
 	summary = binary.AppendUvarint(summary, 1)
-	root.SetAttributes(attribute.String("remEndEvents", string(summary))) // Tomislav-RetCtx: raw bytes
+	root.SetAttributes(attribute.String("remEndEvents", string(summary))) // raw bytes
 	root.End()
 	// The next outgoing span of this process carries the delayed truss.
 	_, next := tracer.Start(context.Background(), "next-request", trace.WithSpanKind(trace.SpanKindServer))
@@ -319,7 +318,7 @@ func TestStructuralBridgeFanOutTrusses(t *testing.T) {
 				hasBR = true
 			}
 		}
-		// Tomislav-RetCtx (user 2026-10-29): one attribute, `_o` = ordinal || depth; no `_d` beside it.
+		// One attribute, `_o` = ordinal || depth.
 		if !hasO || hasD || hasBR {
 			t.Fatalf("ordinary span wire attributes wrong: o=%v d=%v br=%v", hasO, hasD, hasBR)
 		}
@@ -348,7 +347,7 @@ func TestStructuralBridgeFixedDistance(t *testing.T) {
 		} else if ckpt != anchor || len(tail.ordinals) != depth%3 {
 			t.Fatalf("ordinary span at %d lost anchor or ordinals: %+v", depth, tail)
 		}
-		// Tomislav-RetCtx: with the child ordinal the instrumentation always puts there (a first child).
+		// With the child ordinal the instrumentation puts there (a first child).
 		ctx = backend.SetBaggageInContext(context.WithValue(trace.ContextWithSpanContext(context.Background(), span.SpanContext()), "seqNum", 1),
 			map[string]string{BaggageBRKey: baggageBR(span)})
 		span.End()

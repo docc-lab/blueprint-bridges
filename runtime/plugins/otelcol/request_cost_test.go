@@ -1,18 +1,13 @@
 package otelcol
 
-// Tomislav-RetCtx: per-request application cost of tracing, mirroring what a frontend
-// SearchHandler does per request in the deployed hotel services (CPU profile 2026-09-23,
-// frontend at 12k rps: PB +25 s CPU per 30 s over vanilla, ~70 us/request):
+// Benchmarks the per-request application cost of tracing, modelled on a frontend request handler:
 //
-//   - one server span (the request root, as the frontend is for wrk2),
-//   - three client spans, each doing the generated OT client wrapper's work
-//     (plugins/opentelemetry/ir_ot_client.go): copy the upstream baggage, read
-//     "__bag."-prefixed span attributes into it, marshal the span context and wrap it
-//     with the baggage as JSON (backend.AddBaggageToTraceContext); for the bridges with
-//     the response path on, hand a returned checkpoint truss to PrepareCheckpoint,
-//   - span End (processor OnEnd: classify, build the span proto, buffer),
-//   - the export encode: every 64 requests the buffered spans (already encoded at OnEnd,
-//     otlp_wire.go) are concatenated into the export request as the flush does (no network).
+//   - one server span (the request root),
+//   - three client spans, each doing the client instrumentation's work: copy the upstream baggage,
+//     add the span's "__bag." attributes, encode the span context with the baggage, and, for the
+//     bridges with the response path on, hand a returned truss to PrepareCheckpoint,
+//   - span End (processor OnEnd: classify, encode, buffer),
+//   - every 64 requests, the export encode of the buffered spans, as the flush does (no network).
 //
 // Run:  go test ./runtime/plugins/otelcol/ -run '^$' -bench 'BenchmarkRequest' -benchmem -count 5
 
@@ -161,9 +156,8 @@ func BenchmarkRequestPBReverse(b *testing.B)   { benchRequest(b, "pb", true) }
 func BenchmarkRequestCGPBReverse(b *testing.B) { benchRequest(b, "cgpb", true) }
 func BenchmarkRequestSBReverse(b *testing.B)   { benchRequest(b, "sb", true) }
 
-// Tomislav-RetCtx: arbitrary baggage still propagates on bridge spans. The bridge's own `_br`
-// comes from its wire state (backend.AppendSpanBaggage); any other producer's "__bag." attribute
-// still reaches the outgoing baggage and "__bagdel." still removes an upstream key.
+// TestBridgeSpanKeepsArbitraryAttributeBaggage: on bridge spans, `_br` comes from the wire table, but
+// other "__bag." attributes still become outgoing baggage and "__bagdel." still removes a key.
 func TestBridgeSpanKeepsArbitraryAttributeBaggage(t *testing.T) {
 	t.Setenv("REVERSE_TRUSS", "off")
 	for _, kind := range []string{"pb", "cgpb", "sb"} {

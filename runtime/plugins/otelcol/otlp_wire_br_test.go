@@ -1,7 +1,7 @@
 package otelcol
 
-// Tomislav-RetCtx (user 2026-10-29): one bridge attribute per span.  The layout of `_br`, `_d`
-// and `_o` as appendBridgeWireBytes writes them, read back by hand and by splitBR.
+// The layout of `_br`, `_d` and `_o` as appendBridgeWireBytes writes them, read back by hand and by
+// splitBR.
 
 import (
 	"bytes"
@@ -126,8 +126,8 @@ func TestLegacyBridgeBytesFoldsTheAttributes(t *testing.T) {
 	if len(kv) != 1 || !bytes.Equal(kv[0].Value.GetBytesValue(), append(append([]byte{byte(len(rc))}, rc...), 1, 2, 3)) {
 		t.Fatalf("legacy checkpoint: %v", kv)
 	}
-	// Tomislav-RetCtx: a reverse context on an ordinary span is a broken invariant now (invariants.go;
-	// it used to be dropped silently); the ordinary encoding is checked without one.
+	// A reverse context on an ordinary span is a broken invariant; the ordinary encoding is checked
+	// without one.
 	mustBreakInvariant(t, "reverse context on an ordinary span", func() { appendBridgeWireBytes(nil, b, false) })
 	b.rc = ""
 	kv = decodeKV(t, appendBridgeWireBytes(nil, b, false))

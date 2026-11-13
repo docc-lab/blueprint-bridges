@@ -65,8 +65,8 @@ func ttlChildContext(t *testing.T, span trace.Span) context.Context {
 		t.Fatal(err)
 	}
 	ctx := trace.ContextWithRemoteSpanContext(context.Background(), span.SpanContext())
-	// Tomislav-RetCtx: the server instrumentation also puts the caller's child ordinal on the
-	// context (from __seq, always >= 1; the processors check it): each span here is a first child.
+	// The server instrumentation also puts the caller's child ordinal on the context (from __seq,
+	// always >= 1): each span here is a first child.
 	ctx = context.WithValue(ctx, "seqNum", 1)
 	return backend.SetBaggageInContext(ctx, decoded)
 }
@@ -100,7 +100,7 @@ func TestCheckpointTTLPaths(t *testing.T) {
 					} else if incoming == 0 || raw[0] != incoming-1 {
 						t.Fatalf("depth %d: incoming=%d outgoing=%d", depth, incoming, raw[0])
 					}
-					{ // Tomislav-RetCtx: the SB payload shares the ranged window core prefix.
+					{ // the SB payload starts with the range-mode window core
 						_, nextAnchor, nextDistance, nextBloom, _, valid := unpackCheckpointWindowBR(raw[1:])
 						if !valid {
 							t.Fatal("missing outgoing window geometry")
@@ -149,7 +149,7 @@ func TestCheckpointTTLPaths(t *testing.T) {
 						t.Fatal("OnStart exported an unfinished span")
 					}
 					oldHP := len(hp)
-					// Tomislav-RetCtx: the wire state is freed at OnEnd; read the payload first.
+					// The wire entry is freed at OnEnd; read the payload first.
 					wantEmit, _ := decodeBR(checkpointSpanAttribute(span, AttrBREmit))
 					span.End()
 					hp, lp = snapshot()
@@ -314,8 +314,8 @@ func TestCheckpointTTLReverseLocation(t *testing.T) {
 				spans = append(spans, span)
 				ctx = ttlChildContext(t, span)
 			}
-			// Tomislav-RetCtx: depth 2 is an original TTL checkpoint and cannot
-			// reject. Only the early leaf at depth 3 returns a new reverse TTL.
+			// Depth 2 is a scheduled checkpoint and cannot decline; only the early leaf at depth 3 returns a
+			// new reverse TTL.
 			if carried, _ := backend.PrepareCheckpoint(tp, spans[2], ""); carried != "" {
 				t.Fatal("original TTL checkpoint rejected")
 			}

@@ -1,10 +1,7 @@
 package otelcol
 
-// Tomislav-RetCtx: isolate the per-span state table. The access pattern is
-// store-once, load-once, delete-once per span, with keys that are never reused --
-// the worst possible shape for sync.Map, which is built for read-mostly maps with
-// stable keys: every new key misses the read-only map, takes the dirty-map mutex,
-// and eventually forces a promotion that copies the whole map.
+// Benchmarks the per-span state table against sync.Map for its access pattern: every key is new,
+// stored once, loaded once and deleted once.
 //
 // Run: RETCTX_COST=1 go test ./runtime/plugins/otelcol -run XXX \
 //        -bench BenchmarkReverseState -benchmem -cpu 1,8,40

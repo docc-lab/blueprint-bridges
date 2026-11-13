@@ -1,24 +1,14 @@
 package otelcol
 
-// Tomislav-RetCtx: what does an OTLP export actually cost the application, and
-// does a timed-out export cost less than one that completes?
+// Benchmarks the application-side CPU cost of an OTLP export under three server behaviours, with a
+// real otlptracegrpc client and identical payloads:
 //
-// The no-work campaigns produced a paradox: the "passthrough" collectors (real
-// store behind them) gave HIGHER application throughput than "sink" collectors
-// (nothing downstream, every export acknowledged instantly), even though
-// passthrough silently lost ~30 % of its spans to gRPC deadline expiry. The
-// deployed measurement said composepost spends ~20 % more CPU per request when
-// every export lands. This isolates that claim from the cluster.
+//	ok      respond at once            (a collector with nothing downstream)
+//	refuse  respond Unavailable at once (admission control refusing)
+//	stall   never respond; the client hits its deadline (a saturated pipeline)
 //
-// Three server behaviours, one real otlptracegrpc client, identical payloads:
-//   ok      - respond immediately            (sink regime)
-//   refuse  - respond Unavailable immediately (admission regime)
-//   stall   - never respond; client hits its deadline (passthrough regime)
-//
-// The gRPC server runs in-process, so its CPU is included in the totals. That is
-// deliberate and harmless: gRPC reads and unmarshals the request before invoking
-// the handler in ALL three modes, so server cost is common and cancels in the
-// differences, which is what is being compared.
+// The gRPC server runs in-process, so its CPU is in the totals; it reads and decodes the request in
+// all three modes, so it cancels out of the differences.
 //
 // Run: OTLP_DEADLINE_MS=100 go test ./runtime/plugins/otelcol/ -run TestExportCost -v
 

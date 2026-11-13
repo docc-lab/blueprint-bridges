@@ -1,7 +1,7 @@
 package otelcol
 
-// Tomislav-RetCtx (user 2026-11-06): each invariant the processors check panics with a
-// *backend.InvariantError when it is broken, and what a real parent span hands its child passes.
+// Each invariant the processors check panics with a *backend.InvariantError when broken, and what a
+// real parent span hands its child passes.
 
 import (
 	"context"

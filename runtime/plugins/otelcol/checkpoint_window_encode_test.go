@@ -1,7 +1,6 @@
 package otelcol
 
-// Tomislav-RetCtx: the single-buffer window encoder must produce exactly the bytes of the
-// filter-object path it replaced.
+// The single-buffer window encoder must produce exactly the bytes of the filter-object path.
 
 import (
 	"bytes"
@@ -61,9 +60,8 @@ func TestEncodeWindowPayloadsMatchesFilterPath(t *testing.T) {
 		isCheckpoint := rng.Intn(2) == 0
 		ttl := byte(rng.Intn(256))
 		if inherited != nil && len(inherited) != g.bytes {
-			// Tomislav-RetCtx: a parent Bloom of the wrong width cannot come out of
-			// unpackCheckpointWindowBR; the encoder now treats one as a broken invariant
-			// (invariants.go) instead of starting the window empty.
+			// A parent filter of the wrong width cannot come out of unpackCheckpointWindowBR, so the
+			// encoder treats one as a broken invariant.
 			mustBreakInvariant(t, "wrong-width inherited Bloom", func() {
 				encodeWindowPayloads(r, depth, anchor, distance, inherited, ha, isCheckpoint, ttl, sid)
 			})

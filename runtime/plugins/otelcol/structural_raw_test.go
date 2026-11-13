@@ -1,8 +1,8 @@
 package otelcol
 
-// Tomislav-RetCtx: the allocation-free Lehmer packing and the raw (undecoded) handling of inherited
-// S-Bridge tails (structural_truss.go) must produce exactly the bytes, and accept exactly the
-// payloads, that the decode-and-re-encode code did.
+// The allocation-free Lehmer packing and the raw handling of inherited SB tails (structural_truss.go)
+// must produce exactly the bytes, and accept exactly the payloads, that decoding and re-encoding
+// does.
 
 import (
 	"bytes"
@@ -45,8 +45,8 @@ func randomEnds(r *rand.Rand, bound int) []int {
 	if r.Intn(10) == 0 {
 		ends := make([]int, r.Intn(4))
 		for i := range ends {
-			// Tomislav-RetCtx: irregular groups (duplicates, ordinals above the bound: a later sibling
-			// can end before an earlier one starts) but never below 1, which packEndGroup now checks.
+			// Irregular groups (duplicates, ordinals above the bound: a later sibling can end before an
+			// earlier one starts), but never below 1.
 			ends[i] = 1 + r.Intn(bound+2)
 		}
 		return ends
@@ -269,9 +269,8 @@ func TestStructuralOnStartMatchesOld(t *testing.T) {
 				ctx := context.Background()
 				br := ""
 				if r.Intn(10) != 0 { // a parent window
-					// Tomislav-RetCtx: only parents an S-Bridge of this configuration writes (startStructural
-					// checks it): in fixed mode the processor's own distance, in range mode a TTL below the
-					// window's distance.  (Parents past their TTL used to be generated, and ignored.)
+					// Only parents this configuration writes: in fixed mode the processor's own distance, in range
+					// mode a TTL below the window's distance.
 					distance := 1 + r.Intn(6)
 					if !mode.rng.enabled() {
 						distance = int(mode.cpd)

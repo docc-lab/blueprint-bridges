@@ -1,19 +1,12 @@
 package otelcol
 
-// Tomislav-RetCtx: does an export that never gets written cost less CPU than one
-// that completes?
+// Benchmarks the CPU cost of an export that never gets written, against one that completes.
 //
-// export_cost_test.go stalled by holding the handler after gRPC had already READ
-// and unmarshalled the whole request, so the client had paid the full transport
-// cost before failing. That is NOT what a saturated collector does. A saturated
-// collector stops reading, its HTTP/2 flow-control window drains, and the client
-// blocks partway through writing the request body.
-//
-// This server completes the HTTP/2 handshake, advertises a 1 KiB per-stream
-// window, and then never reads another byte or issues a WINDOW_UPDATE. The
-// client therefore marshals the payload, writes ~1 KiB, and blocks until its
-// deadline. Comparing that against a server that acknowledges normally isolates
-// the cost of actually pushing a batch through the transport.
+// A saturated collector stops reading: its HTTP/2 flow-control window fills and the client blocks
+// partway through writing the request. This server completes the handshake, advertises a 1 KiB
+// per-stream window and never reads again, so the client encodes the batch, writes about 1 KiB and
+// blocks until its deadline. Compared with a server that answers normally, this isolates the cost
+// of pushing a batch through the transport.
 //
 // Run: EXPORT_COST=1 OTLP_DEADLINE_MS=100 go test ./runtime/plugins/otelcol/ \
 //          -run TestBackpressureExportCost -v -count=1

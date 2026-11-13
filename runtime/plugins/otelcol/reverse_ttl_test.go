@@ -114,9 +114,9 @@ func TestReverseTTLRespectsSyntheticForceLP(t *testing.T) {
 	}
 }
 
-// Tomislav-RetCtx: exercise the entire SDK return path through nested concurrent
-// fanout. Every rejected leaf must appear exactly once at the ancestor selected
-// by its initial TTL or the first original checkpoint encountered on that path.
+// Exercises the whole SDK return path through a nested, concurrent fan-out: every declining leaf
+// must appear exactly once, at the ancestor its TTL selects or at the first scheduled checkpoint on
+// its path.
 func TestReverseTTLConcurrentTree(t *testing.T) {
 	testReversePolicyTree(t, reversePolicy{})
 }

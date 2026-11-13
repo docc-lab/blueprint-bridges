@@ -49,8 +49,8 @@ func TestReversePolicyConfig(t *testing.T) {
 	}
 }
 
-// Tomislav-RetCtx: normalization concerns conditional probabilities; earlier
-// successes and mandatory root absorption determine the final distribution.
+// The policies normalize conditional probabilities; earlier successes and the root's mandatory
+// absorption determine the final distribution.
 func TestReversePolicyDepthProbabilities(t *testing.T) {
 	inverse := reversePolicy{mode: reversePolicyInverseDepth}
 	linear := reversePolicy{mode: reversePolicyDepthLinear}
@@ -99,9 +99,8 @@ func TestReversePolicyDepthProbabilities(t *testing.T) {
 	}
 }
 
-// Tomislav-RetCtx: depth_cubic must equal the bridges repo's formula (bridge/reverse.go,
-// reverseAcceptance "depth_cubic") for every valid (receiver, origin) pair, be normalized over
-// the n ancestors, never exceed 1, and absorb closer to the leaf than inverse_depth.
+// depth_cubic matches its formula for every valid (receiver, origin) pair, sums to one over the n
+// ancestors, never exceeds 1, and absorbs closer to the leaf than inverse_depth.
 func TestReversePolicyDepthCubic(t *testing.T) {
 	cubic := reversePolicy{mode: reversePolicyDepthCubic}
 	inverse := reversePolicy{mode: reversePolicyInverseDepth}

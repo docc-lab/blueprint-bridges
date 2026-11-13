@@ -258,7 +258,7 @@ func (p *RandomCheckpointProcessor) logMetrics() {
 		"hp_buffer_depth", hpDepth,
 		"lp_buffer_depth", lpDepth,
 	)
-	// Tomislav-RetCtx: SDK retry gauges on their own line (sdk_retry.go; parsed as BRIDGES_RETRY)
+	// The retry gauges go on a line of their own.
 	sdkRetry.logMetrics()
 }
 
@@ -350,7 +350,7 @@ func (p *RandomCheckpointProcessor) dispatchPriority(snap []sbBufEntry, isHP boo
 
 func (p *RandomCheckpointProcessor) exportBatch(events []*tracepb.ResourceSpans, n int64, isHP bool) {
 	defer p.exportWG.Done()
-	// Tomislav-RetCtx: SDK one-shot retry policy (sdk_retry.go; BRIDGES_RETRY, default off).
+	// At most one retry, per BRIDGES_RETRY (default off).
 	if !isHP && sdkRetry.suppressLP() {
 		sdkRetry.lpSuppressed.Add(n)
 		p.batchDropped(events, n, isHP, errLPSuppressed)
@@ -386,7 +386,7 @@ func (p *RandomCheckpointProcessor) batchDropped(events []*tracepb.ResourceSpans
 		atomic.AddInt64(&p.lpDropped, n)
 	}
 	p.categorizeSendError(err)
-	recordRefused(events, isHP) // Tomislav-RetCtx: census of trace IDs in the dropped batch
+	recordRefused(events, isHP)
 	slog.Error("Failed to send batch", "error", err, "count", n, "hp", isHP)
 }
 

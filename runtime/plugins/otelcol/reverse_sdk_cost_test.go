@@ -1,34 +1,10 @@
 package otelcol
 
-// Tomislav-RetCtx: where does the response path's application CPU actually go?
-//
-// Measured on the cluster, PB at matched pre-knee load, application CPU per
-// completed request: 19.14 cores with REVERSE_TRUSS=off, 22.57 with it on (old
-// encoding), 21.50 with the packed encoding. So the wire format accounts for
-// roughly a quarter to a third of the overhead and something else carries the
-// rest. Collector CPU is ~1.2 cores across all eight in every mode, so the cost
-// is in the application, not downstream.
-//
-// The suspect is attribute bookkeeping rather than anything on the wire. In the
-// OTel SDK, ReadWriteSpan.Attributes() is not a cheap read:
-//
-//	func (s *recordingSpan) Attributes() []attribute.KeyValue {
-//	    s.mu.Lock(); defer s.mu.Unlock()
-//	    s.dedupeAttrs()
-//	    return s.attributes
-//	}
-//
-// every call takes the span mutex and runs a dedupe pass. The generated client
-// wrapper's per-span reverse sequence calls it several times over: OnStart scans
-// once for AttrBREmit and again inside isScheduledPathCheckpoint, then on the
-// response PrepareCheckpoint scans once more and spanHasChildren again, and
-// ReadReverseBaggage scans a final time looking for a value PrepareCheckpoint
-// itself just wrote. Interleaved are three to five locked SetAttributes calls.
-//
-// This benchmark replays that exact sequence against a real recording span, with
-// the reverse wrapper installed and without it, so the per-span delta is
-// measured rather than argued. It is the SDK-side analogue of the wire-format
-// benchmark in runtime/core/backend/retctx_cost_test.go.
+// Benchmarks the response path's per-span SDK cost: the sequence of attribute reads and writes the
+// client instrumentation performs around a span, against a real recording span, with and without
+// the response-path wrapper. ReadWriteSpan.Attributes() is not a cheap read: each call locks the
+// span and dedupes its attributes. The wire-format counterpart is
+// runtime/core/backend/retctx_cost_test.go.
 //
 // Run: RETCTX_COST=1 go test ./runtime/plugins/otelcol -run XXX \
 //        -bench BenchmarkReverseSpan -benchmem -benchtime 200000x
@@ -121,13 +97,8 @@ func BenchmarkReverseSpanAttributesOnly(b *testing.B) {
 	}
 }
 
-// Tomislav-RetCtx: the deployed profile showed OnStart RISING on composepost
-// (11.10s -> 14.59s) after per-span reverse state moved off the span and into a
-// sync.Map, while the other three services were flat or better. composepost is the
-// busiest and most concurrent service, so the suspicion is contention on the map
-// rather than the map lookup itself. This benchmark reproduces that shape locally:
-// many goroutines each starting and preparing a span, which is exactly the fan-out
-// pattern composepost runs.
+// BenchmarkReverseSpanParallel runs the same sequence from many goroutines at once, as a service
+// that fans out does, to expose contention on the per-span state.
 //
 //	Run: RETCTX_COST=1 go test ./runtime/plugins/otelcol -run XXX \
 //	       -bench BenchmarkReverseSpanParallel -benchmem -cpu 1,8,40

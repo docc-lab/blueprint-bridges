@@ -1,8 +1,8 @@
 package otelcol
 
-// Tomislav-RetCtx: reverse_passthrough. Off (default), a scheduled checkpoint terminates every
-// returned truss regardless of policy; on, it routes returned trusses by the policy like any
-// other non-root span. The root always terminates.
+// reverse_passthrough: off (the default), a scheduled checkpoint absorbs every returned truss
+// whatever the policy; on, it routes them by the policy like any other non-root span. The root
+// always absorbs.
 
 import (
 	"errors"

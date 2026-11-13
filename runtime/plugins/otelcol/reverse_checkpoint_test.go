@@ -70,8 +70,7 @@ func checkpointParentContext(kind string, depth int) context.Context {
 	if kind == "sb" {
 		bagBR = propBR(br) // SB keeps its state beside the span: raw bytes (pack.go)
 	}
-	// Tomislav-RetCtx: a span under a bridge window always has its child ordinal on the context (the
-	// instrumentation puts it there; the processors check it): a first child.
+	// A span under a bridge window always has its child ordinal on the context: a first child.
 	ctx := context.WithValue(context.Background(), "seqNum", 1)
 	return backend.SetBaggageInContext(ctx, map[string]string{
 		reverseDepthBaggageKey: strconv.Itoa(depth), BaggageBRKey: bagBR,
@@ -87,10 +86,9 @@ func TestSDKReturnsCheckpointWithoutDroppingSpan(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			provider, buffered := checkpointTestProvider(kind)
 			_, span := provider.Tracer("test").Start(checkpointParentContext(kind, 129), "leaf", trace.WithSpanKind(trace.SpanKindServer))
-			// Tomislav-RetCtx: ranged bridges keep `_br` beside the span (wire_state.go).
+			// Range-mode bridges keep `_br` in the wire table.
 			expectedTruss, _ := decodeBR(checkpointSpanAttribute(span, AttrBREmit))
-			// Tomislav-RetCtx: the carrier comes back from PrepareCheckpoint now; it is
-			// no longer parked on the span as a __bag. attribute for the caller to find.
+			// PrepareCheckpoint returns the reverse context to pass on.
 			retCtx, _ := backend.PrepareCheckpoint(provider, span, "")
 			if retCtx == "" || !span.IsRecording() {
 				t.Fatal("SDK must return the carrier while the span is still mutable")
@@ -244,7 +242,7 @@ func TestSDKUpstreamReverseCheckpointPriority(t *testing.T) {
 			_, span := provider.Tracer("test").Start(checkpointParentContext(kind, 0), "caller", trace.WithSpanKind(trace.SpanKindClient))
 			retCtx := backend.EncodeCheckpointRetCtxWithTTL(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 130, backend.SegPathCheckpoint, []byte{9, 8, 7}, 0)
 			span.SetAttributes(attribute.String(backend.ReverseTrussInputKey, retCtx))
-			// Tomislav-RetCtx: the returned carrier must agree with what the span holds.
+			// The returned reverse context must agree with what the span holds.
 			if out, prepared := backend.PrepareCheckpoint(provider, span, retCtx); !prepared || out != "" || backend.ReadReverseBaggage(span) != "" {
 				t.Fatal("SDK did not consume the received trusses before span end")
 			}
@@ -265,8 +263,7 @@ func TestSDKUpstreamReverseCheckpointPriority(t *testing.T) {
 					exported = rc
 				}
 			}
-			// Tomislav-RetCtx (user 2026-10-29): the reverse context is exported raw, folded into the
-			// one `_br` attribute (otlp_wire.go appendBridgeWireBytes); no `_rc` beside it.
+			// The reverse context is exported raw, inside the `_br` attribute.
 			if string(exported) != retCtx {
 				t.Fatal("upstream checkpoint export lost the returned truss")
 			}

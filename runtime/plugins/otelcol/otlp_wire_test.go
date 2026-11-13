@@ -1,10 +1,8 @@
 package otelcol
 
-// Tomislav-RetCtx: the direct OTLP encoder (otlp_wire.go) is held to the object trees the
-// processors used to build and marshal with protobuf, byte for byte.  The reference below is that
-// old code: buildSpanProto, the convert* functions and appendBridgeWire of vanilla_processor.go,
-// pb_processor.go, cgpb_processor.go and sb_processor.go as of commit ecf78ae4, with the four
-// processors' strip lists under one switch.
+// The direct OTLP encoder (otlp_wire.go) must produce exactly the bytes that building OTLP protobuf
+// objects and marshalling them does. The reference implementation below builds those objects the
+// way the processors once did, with their attribute filtering in one switch.
 
 import (
 	"bytes"
@@ -129,8 +127,8 @@ func refAttributes(attrs []attribute.KeyValue, policy attrPolicy, span bool) []*
 				continue
 			}
 		}
-		// Tomislav-RetCtx (2026-10-29): a bridge span's own breadcrumbs and reverse context are
-		// written by refBridge as one attribute; on events and links they are ordinary attributes.
+		// A bridge span's own bridge data and reverse context are written by refBridge as one
+		// attribute; on events and links they are ordinary attributes.
 		if span {
 			switch attr.Key {
 			case AttrBREmit, AttrD, AttrO, backend.ReverseTrussCheckpointKey:
@@ -355,9 +353,8 @@ func randomWire(r *rand.Rand) *bridgeWire {
 		return nil
 	}
 	w := &bridgeWire{depth: r.IntN(300), priority: r.IntN(2) == 1, structural: r.IntN(2) == 1, ordinal: r.IntN(130)}
-	// Tomislav-RetCtx: only what OnStart and PrepareCheckpoint produce (the encoder checks it,
-	// invariants.go): a payload is never empty, and a reverse context is the packed envelope (its
-	// version byte, 0x01, first).
+	// Only what OnStart and PrepareCheckpoint produce, which the encoder checks: a payload is never
+	// empty, and a reverse context is a packed envelope (version byte 0x01 first).
 	w.emit = make([]byte, 1+r.IntN(60))
 	for i := range w.emit {
 		w.emit[i] = byte(r.IntN(256))
@@ -411,12 +408,11 @@ func TestEncodeSpanMatchesProtoMarshal(t *testing.T) {
 		}
 		hp := r.IntN(2) == 1
 		if w != nil && !hp {
-			w.rev.rc = "" // Tomislav-RetCtx: a span with a reverse context is always a checkpoint (pathCheckpoint)
+			w.rev.rc = "" // a span with a reverse context is always a checkpoint
 		}
 		attrs := s.Attributes()
 		if !hp && policy != policyVanilla {
-			// Tomislav-RetCtx: likewise an attribute-carried reverse context (`_rc`, legacy fixed mode)
-			// makes a bridge span a checkpoint, so an ordinary one never has it.
+			// Likewise for an attribute-carried reverse context (`_rc`, fixed-distance mode).
 			attrs = slices.DeleteFunc(slices.Clone(attrs), func(kv attribute.KeyValue) bool {
 				return kv.Key == backend.ReverseTrussCheckpointKey
 			})
@@ -445,7 +441,7 @@ func TestBuildBatchMatchesProtoMarshal(t *testing.T) {
 	for _, res := range []*resource.Resource{nil, resource.Empty(), resource.NewSchemaless(attribute.String("service.name", "text"), attribute.Int("n", 3))} {
 		for _, scope := range []instrumentation.Scope{{Name: "TextService"}, {Name: "ComposePost", Version: "2"}, {}} {
 			for _, n := range []int{0, 1, 2, 17, 600} {
-				if n == 0 { // Tomislav-RetCtx: batches never builds an empty batch; buildBatch checks it
+				if n == 0 { // batches never builds an empty batch
 					mustBreakInvariant(t, "empty batch", func() { buildBatch(resourceField(res), scopeField(scope), nil) })
 					continue
 				}
@@ -458,7 +454,7 @@ func TestBuildBatchMatchesProtoMarshal(t *testing.T) {
 					w := randomWire(r)
 					hp := r.IntN(2) == 1
 					attrs := s.Attributes()
-					if !hp { // Tomislav-RetCtx: as in TestEncodeSpanMatchesProtoMarshal: no reverse context on an ordinary span
+					if !hp { // no reverse context on an ordinary span
 						if w != nil {
 							w.rev.rc = ""
 						}
