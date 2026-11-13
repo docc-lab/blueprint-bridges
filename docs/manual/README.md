@@ -13,6 +13,7 @@ This User Manual is a work in progress.
  1. Configuring Applications: the Wiring Spec
     1. [📝Wiring Spec](wiring.md)
     1. [📝Supported Plugins](plugins.md)
+    1. [Interceptors and Middleware](interceptors.md)
  1. Compiling and Running
     1. [Compiling an Application](compiling.md)
     1. [Running an Application](running.md)
