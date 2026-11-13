@@ -1,4 +1,3 @@
-// Package otelcol implements a tracer [backend.Tracer] client interface for the OpenTelemetry collector.
 package otelcol
 
 import (
@@ -24,52 +23,39 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// PathBridgeProcessor mirrors StructuralBridgeProcessor's export/metrics
-// architecture exactly — dual HP/LP buffers, priority-homogeneous batched
-// export with the "bridges-priority: hp|lp" gRPC metadata header, retry-off
-// client, and the full per-priority counter set logged as a
-// `pb_processor_metrics` line — so the collector's priority processor can
-// shed LP selectively and the SDK-side CP-loss numbers are measured, not
-// estimated. The ONLY thing that differs from SB is the breadcrumb
-// composition in OnStart (PCRB: full-width-ckpt-anchored path bridge, mirrors
-// bridges/bridge/pcrb.go) and the `_d`/`_br` wire emission in
-// convertAttributes. Reuses SB's package-level tunables (SBExportInterval,
-// SBBatchSize, SBMetricsInterval, MetadataPriorityKey, sbBufEntry) and the
-// shared grpcDeadline / grpcRetryEnabled knobs.
+// PathBridgeProcessor is the path bridge (PB). Each span carries the window from its nearest
+// checkpoint ancestor: that checkpoint's span ID and a Bloom filter of the spans in between.
+// Checkpoints and leaves export it, which lets reconstruction place them even when the low-priority
+// spans between them are lost. Spans are exported in high- and low-priority batches, marked so the
+// collector's priority processor can shed low priority first.
 type PathBridgeProcessor struct {
 	mu sync.RWMutex
 
-	// Tomislav-RetCtx: the OTLP connection (otlp_wire.go); the export bytes are written here.
 	conn *otlpConn
 
-	// Configuration
 	agentEndpoint string
 	ancestryMode  AncestryMode
 
 	bloomFilter *bloom.BloomFilter
 
-	// Background processing
 	stopChan chan struct{}
 	wg       sync.WaitGroup
 
-	// Tracks in-flight per-batch export goroutines so Shutdown can wait
-	// for them to drain before closing the gRPC client.
+	// exportWG tracks in-flight exports, so Shutdown can wait for them before closing the connection.
 	exportWG sync.WaitGroup
 
-	// Two physical buffers, separated by CP/LP classification at OnEnd.
-	// flushBuffer drains them sequentially with HP preference (see SB).
-	hpBuf      []wireSpan // Tomislav-RetCtx: encoded spans (otlp_wire.go)
+	// Ended spans, encoded, by priority. flushBuffer sends the high-priority ones first.
+	hpBuf      []wireSpan
 	lpBuf      []wireSpan
 	eventsLock sync.Mutex
 
-	// Shared Resource proto for every export, captured lazily on first OnEnd.
-	resource     []byte // the encoded ResourceSpans.resource field (otlp_wire.go, resourceField)
+	// resource is the encoded Resource, captured on the first OnEnd.
+	resource     []byte
 	resourceOnce sync.Once
 
-	// Per-batch / per-priority counters (all atomic). Mirrors SB exactly:
-	//   spansReceived = OnEnd entries; spansFlushed = spansSent+spansDropped
-	//   cpReceived+lpReceived = spansReceived; cpSent+lpSent = spansSent;
-	//   cpDropped+lpDropped = spansDropped. send_* bucket drops by gRPC code.
+	// Counters, updated atomically. Every flushed span ends up sent or dropped, and each counts as
+	// checkpoint (cp) or low priority (lp): cpReceived + lpReceived = spansReceived, and likewise for
+	// sent and dropped. The send* counters split failed exports by gRPC code.
 	spansReceived   int64
 	spansFlushed    int64
 	spansSent       int64
@@ -88,23 +74,23 @@ type PathBridgeProcessor struct {
 	cpDropped       int64
 	lpDropped       int64
 
-	// Config discovery
+	// Parameters read from the collector's config discovery endpoint.
 	configDiscoveryPort int
 	httpClient          *http.Client
 	configMap           map[string]interface{}
 	configLock          sync.RWMutex
 
-	// Checkpoint distance (parsed from config, default: 1)
+	// checkpointDistance is used in fixed-distance mode; a set checkpointRange selects range mode.
 	checkpointDistance int64
 	checkpointRange    checkpointRange
 	reversePolicy      reversePolicy
 }
 
-// Darby: this gets run once per service (when initialized)
+// NewPathBridgeProcessor creates a PB processor. It exports to the collector agent on the host of
+// agentEndpoint and reads its parameters from the config discovery endpoint on configDiscoveryPort.
 func NewPathBridgeProcessor(ctx context.Context, agentEndpoint string, configDiscoveryPort string) (*PathBridgeProcessor, error) {
 	slog.Info("🔵 Creating new PathBridgeProcessor", "agentEndpoint", agentEndpoint)
 
-	// Extract host from agent endpoint
 	var host string
 	if strings.Contains(agentEndpoint, ":") {
 		parts := strings.Split(agentEndpoint, ":")
@@ -113,18 +99,14 @@ func NewPathBridgeProcessor(ctx context.Context, agentEndpoint string, configDis
 		}
 	}
 	if host == "" {
-		host = "localhost" // Fallback to localhost
+		host = "localhost"
 	}
 
-	// Create endpoint
 	endpoint := fmt.Sprintf("%s:4317", host)
 
 	slog.Info("🔵 Using endpoint", "endpoint", endpoint)
 
-	// Tomislav-RetCtx: a plain gRPC connection; the processor writes the OTLP bytes itself
-	// (otlp_wire.go) instead of handing protobuf objects to the exporter client.  The exporter's
-	// retry (OTLP_RETRY) has no counterpart on this path: every campaign runs with it off, and the
-	// 1 s export deadline never left room for its 5 s first retry anyway.
+	// A plain gRPC connection: the processor encodes the OTLP request itself (otlp_wire.go).
 	conn, err := dialOTLP(endpoint)
 	if err != nil {
 		slog.Error("❌ Failed to open the OTLP connection", "error", err)
@@ -136,14 +118,12 @@ func NewPathBridgeProcessor(ctx context.Context, agentEndpoint string, configDis
 
 	slog.Info("✅ PathBridgeProcessor created successfully")
 
-	// Parse config discovery port
 	configDiscoveryPortInt, err := strconv.Atoi(configDiscoveryPort)
 	if err != nil {
 		slog.Error("❌ Failed to convert configDiscoveryPort to int", "error", err)
 		return nil, fmt.Errorf("failed to convert configDiscoveryPort to int: %w", err)
 	}
 
-	// Create HTTP client for config discovery
 	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
 	}
@@ -157,24 +137,21 @@ func NewPathBridgeProcessor(ctx context.Context, agentEndpoint string, configDis
 		configDiscoveryPort: configDiscoveryPortInt,
 		httpClient:          httpClient,
 		configMap:           make(map[string]interface{}),
-		checkpointDistance:  1, // Default: every span is a checkpoint
+		checkpointDistance:  1, // until the config says otherwise
 	}
 
 	slog.Info("🔵 Ancestry mode configured", "mode", AncestryModePB)
 
-	// PCRB bloom geometry: capacity = cpd-1 (spans strictly between two
-	// checkpoints), fp = DefaultBloomFPRate. checkpointDistance is the default
-	// (1) here; re-sized in fetchFullConfig once the real cpd is discovered.
+	// Bloom geometry for the default distance; fetchFullConfig resizes it for the configured one.
 	expectedElements := uint(pbBloomCapacity(int(processor.checkpointDistance)))
 	if expectedElements == 0 {
-		expectedElements = 1 // Ensure at least 1 element
+		expectedElements = 1
 	}
 	calculatedM, calculatedK := bloom.EstimateParameters(expectedElements, DefaultBloomFPRate)
 	BloomFilterM = calculatedM
 	BloomFilterK = calculatedK
 	backend.SetRTBloomParams(calculatedM, calculatedK)
 
-	// Fetch full config from config discovery endpoint
 	slog.Info("🔵 About to fetch full config")
 	if err := processor.fetchFullConfig(ctx); err != nil {
 		if errors.Is(err, errInvalidCheckpointRange) || errors.Is(err, errInvalidReversePolicy) {
@@ -187,21 +164,16 @@ func NewPathBridgeProcessor(ctx context.Context, agentEndpoint string, configDis
 		slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
 	}
 
-	// Start background worker for batch export
 	processor.wg.Add(1)
 	go processor.processEvents()
 
-	// Start the metrics logger goroutine. Shares stopChan with
-	// processEvents — Shutdown closes once and both unwind.
 	processor.wg.Add(1)
 	go processor.logMetricsLoop()
 
 	return processor, nil
 }
 
-// logMetricsLoop emits one slog.Info line per SBMetricsInterval with the
-// full per-priority counter snapshot, until stopChan is closed. Tail via
-// `kubectl logs deploy/<svc> | grep pb_processor_metrics`.
+// logMetricsLoop logs the counters every SBMetricsInterval until stopChan is closed.
 func (p *PathBridgeProcessor) logMetricsLoop() {
 	defer p.wg.Done()
 	t := time.NewTicker(SBMetricsInterval)
@@ -216,8 +188,7 @@ func (p *PathBridgeProcessor) logMetricsLoop() {
 	}
 }
 
-// logMetrics emits one snapshot of every counter plus the current
-// per-priority in-memory buffer depths.
+// logMetrics logs every counter and the buffer depths.
 func (p *PathBridgeProcessor) logMetrics() {
 	p.eventsLock.Lock()
 	hpDepth := len(p.hpBuf)
@@ -244,12 +215,11 @@ func (p *PathBridgeProcessor) logMetrics() {
 		"hp_buffer_depth", hpDepth,
 		"lp_buffer_depth", lpDepth,
 	)
-	// Tomislav-RetCtx: SDK retry gauges on their own line (sdk_retry.go; parsed as BRIDGES_RETRY)
+	// The retry gauges go on a line of their own.
 	sdkRetry.logMetrics()
 }
 
-// categorizeSendError increments the appropriate per-code counter for a
-// failed UploadTraces.
+// categorizeSendError counts a failed export under its gRPC status code.
 func (p *PathBridgeProcessor) categorizeSendError(err error) {
 	switch status.Code(err) {
 	case codes.DeadlineExceeded:
@@ -265,8 +235,7 @@ func (p *PathBridgeProcessor) categorizeSendError(err error) {
 	}
 }
 
-// processEvents runs in the background to periodically drain the event
-// buffer and dispatch batches for export.
+// processEvents flushes the buffers every SBExportInterval, and once more when stopped.
 func (p *PathBridgeProcessor) processEvents() {
 	defer p.wg.Done()
 
@@ -284,9 +253,8 @@ func (p *PathBridgeProcessor) processEvents() {
 	}
 }
 
-// flushBuffer atomically snaps both priority buffers, then dispatches HP
-// chunks first, then LP chunks. Each chunk carries one priority class
-// (never mixed) tagged with a "bridges-priority: hp|lp" gRPC metadata header.
+// flushBuffer exports both buffers, high priority first. Each batch holds one priority and says which
+// in the bridges-priority gRPC metadata.
 func (p *PathBridgeProcessor) flushBuffer() {
 	p.eventsLock.Lock()
 	hpSnap := p.hpBuf
@@ -305,25 +273,23 @@ func (p *PathBridgeProcessor) flushBuffer() {
 	p.dispatchPriority(lpSnap, false)
 }
 
-// dispatchPriority groups one priority class's snapshot by scope, chunks
-// each scope group at SBBatchSize, and spawns one goroutine per chunk.  Each chunk is encoded as
-// one ExportTraceServiceRequest (otlp_wire.go, buildBatch): one ResourceSpans (the shared
-// Resource) wrapping one ScopeSpans wrapping up to SBBatchSize spans.
+// dispatchPriority exports one priority's spans in batches of at most SBBatchSize, each in its own
+// goroutine.
 func (p *PathBridgeProcessor) dispatchPriority(snap []wireSpan, isHP bool) {
 	if len(snap) == 0 {
 		return
 	}
-	batches(p.resource, snap, SBBatchSize, func(batch *wireBatch) { // otlp_wire.go
+	batches(p.resource, snap, SBBatchSize, func(batch *wireBatch) {
 		p.exportWG.Add(1)
 		go p.exportBatch(batch, isHP)
 	})
 }
 
-// exportBatch sends one priority-homogeneous batch and updates counters
-// based on outcome. On failure the spans are permanently dropped (no retry).
+// exportBatch sends one batch and counts the outcome. A refused batch is dropped, or retried once if
+// the retry policy says so (sdk_retry.go).
 func (p *PathBridgeProcessor) exportBatch(batch *wireBatch, isHP bool) {
 	defer p.exportWG.Done()
-	// Tomislav-RetCtx: SDK one-shot retry policy (sdk_retry.go; BRIDGES_RETRY, default off).
+	// At most one retry, per BRIDGES_RETRY (default off).
 	if !isHP && sdkRetry.suppressLP() {
 		sdkRetry.lpSuppressed.Add(batch.n)
 		p.batchDropped(batch, isHP, errLPSuppressed)
@@ -352,7 +318,7 @@ func (p *PathBridgeProcessor) exportBatch(batch *wireBatch, isHP bool) {
 	p.batchSent(batch.n, isHP)
 }
 
-// batchDropped accounts one batch that will not be delivered (census included).
+// batchDropped counts a batch that will not be delivered and records its trace IDs.
 func (p *PathBridgeProcessor) batchDropped(batch *wireBatch, isHP bool, err error) {
 	atomic.AddInt64(&p.batchesDropped, 1)
 	atomic.AddInt64(&p.spansDropped, batch.n)
@@ -362,11 +328,11 @@ func (p *PathBridgeProcessor) batchDropped(batch *wireBatch, isHP bool, err erro
 		atomic.AddInt64(&p.lpDropped, batch.n)
 	}
 	p.categorizeSendError(err)
-	recordRefusedIDs(batch.traceIDs(), isHP) // Tomislav-RetCtx: census of trace IDs in the dropped batch
+	recordRefusedIDs(batch.traceIDs(), isHP)
 	slog.Error("Failed to send batch", "error", err, "count", batch.n, "hp", isHP)
 }
 
-// batchSent accounts one delivered batch.
+// batchSent counts a delivered batch.
 func (p *PathBridgeProcessor) batchSent(n int64, isHP bool) {
 	atomic.AddInt64(&p.batchesSent, 1)
 	atomic.AddInt64(&p.spansSent, n)
@@ -378,10 +344,8 @@ func (p *PathBridgeProcessor) batchSent(n int64, isHP bool) {
 	slog.Debug("Sent batch", "count", n, "hp", isHP)
 }
 
-// sendData sends one encoded, priority-homogeneous batch with the
-// "bridges-priority: hp|lp" gRPC metadata header attached. The
-// collector-side priority processor reads this header to admit or refuse
-// the batch in one O(1) decision.
+// sendData exports one batch, marked with its priority in the bridges-priority gRPC metadata so the
+// collector's priority processor can admit or refuse it without decoding it.
 func (p *PathBridgeProcessor) sendData(req []byte, isHP bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), grpcDeadline)
 	defer cancel()
@@ -392,21 +356,19 @@ func (p *PathBridgeProcessor) sendData(req []byte, isHP bool) error {
 	}
 	ctx = metadata.AppendToOutgoingContext(ctx, MetadataPriorityKey, priorityVal)
 
-	if err := p.conn.export(ctx, req); err != nil { // otlp_wire.go
+	if err := p.conn.export(ctx, req); err != nil {
 		slog.Error("❌ Failed to send data", "error", err, "hp", isHP)
 		return fmt.Errorf("failed to send data: %w", err)
 	}
 	return nil
 }
 
-// Tomislav-RetCtx: startAttributeBaggage tells NewOTCollectorTracer (trace.go) whether OnStart
-// adds "__bag." attributes: only the legacy fixed-cpd mode does (__bag._br, __bag.prio); ranged
-// windows keep that state beside the span (checkpoint_window.go, wire_state.go).
+// startAttributeBaggage reports whether OnStart adds "__bag." attributes: only the legacy
+// fixed-distance mode does.
 func (p *PathBridgeProcessor) startAttributeBaggage() bool { return !p.checkpointRange.enabled() }
 
-// OnStart implements SpanProcessor.OnStart
+// OnStart implements [sdktrace.SpanProcessor].
 func (p *PathBridgeProcessor) OnStart(parent context.Context, s sdktrace.ReadWriteSpan) {
-	// Tomislav-RetCtx: ranged windows carry TTL and their own Bloom geometry.
 	if p.checkpointRange.enabled() {
 		onStartCheckpointWindow(parent, s, p.checkpointRange, false)
 		return
@@ -414,14 +376,10 @@ func (p *PathBridgeProcessor) OnStart(parent context.Context, s sdktrace.ReadWri
 	p.onStartFixed(parent, s)
 }
 
-// onStartFixed is OnStart for the legacy fixed-cpd configuration.  Tomislav-RetCtx: it is its own
-// function only to keep OnStart's stack frame small.  Go sizes a function's frame for everything in
-// it, so while this code was inline, every span start in ranged mode (which returns above) also
-// reserved its 1.2 KB, and on goroutines that start with a small stack that is what made the stack
-// grow (be copied) during the span start (utils/grpc_interceptors/README.md, "Stack growth").
+// onStartFixed is OnStart in the legacy fixed-distance mode. It is a separate function so that
+// OnStart's stack frame stays small in range mode.
 func (p *PathBridgeProcessor) onStartFixed(parent context.Context, s sdktrace.ReadWriteSpan) {
-	// Canonical path bridge (full-width-ckpt-anchored / PCRB; mirrors bridges/bridge/pcrb.go).
-	// Decode inbound baggage `_br` = varint(absolute depth) || ckpt(8) || propagated bloom.
+	// The parent's `_br` is varint(depth) || ckpt(8) || bloom.
 	var (
 		hasParent        bool
 		parentDepth      int
@@ -446,9 +404,8 @@ func (p *PathBridgeProcessor) onStartFixed(parent context.Context, s sdktrace.Re
 		cpd = 1
 	}
 
-	// Absolute depth (root=0); inherited ckpt anchor; INHERITED (pre-self)
-	// window bloom — ancestors strictly between the nearest checkpoint above
-	// and this span.
+	// The window inherited from the parent: its checkpoint, and a filter of the spans strictly between
+	// that checkpoint and this span.
 	var depth int
 	var inheritedCkpt [8]byte
 	var bf *bloom.BloomFilter
@@ -463,31 +420,28 @@ func (p *PathBridgeProcessor) onStartFixed(parent context.Context, s sdktrace.Re
 
 	isCheckpoint := depth%cpd == 0
 
-	// Own span ID -> full 8-byte big-endian anchor (the ckpt children will name).
+	// The anchor this span's children name if it is a checkpoint.
 	spanID := s.SpanContext().SpanID().String()
 	sid8, _ := spanIDHexTo8Bytes(spanID)
 	var ownCkpt [8]byte
 	copy(ownCkpt[:], sid8[:])
 
-	// Emit payload for checkpoints AND leaves: names the PREVIOUS checkpoint
-	// (inheritedCkpt) and carries the INHERITED pre-self window bloom.
+	// Checkpoints and leaves export the inherited window.
 	emitPayload := packPathBridgeBR(depth, inheritedCkpt, bf.Bytes())
 
-	// Propagation downstream + the priority decision.
+	// What the children inherit.
 	priority := 0
 	var propCkpt [8]byte
 	var propBloomBytes []byte
 	if isCheckpoint {
-		// Re-root: children name THIS span; reset the window bloom to empty.
+		// A checkpoint anchors a new, empty window on itself.
 		priority = 1
 		propCkpt = ownCkpt
 		propBloomBytes = bloom.New(BloomFilterM, BloomFilterK).Bytes()
 	} else {
-		// Non-checkpoint: same anchor; propagate inherited + self.
+		// Any other span adds itself to the inherited window.
 		propCkpt = inheritedCkpt
-		// Span IDs are already uniformly random -> use them directly as bloom hash
-		// material (no MurmurHash). Same FPR, ~31% cheaper Add. RAW 8 bytes, not the
-		// hex string. See notes/bloom_prehashed_spanid.md.
+		// Span IDs are random, so they serve as the filter's hash input directly.
 		bf.AddPrehashed(sid8[:])
 		propBloomBytes = bf.Bytes()
 	}
@@ -495,27 +449,26 @@ func (p *PathBridgeProcessor) onStartFixed(parent context.Context, s sdktrace.Re
 
 	s.SetAttributes(
 		attribute.Int(AttrBagPrio, priority),
-		attribute.String(AttrBR, encodeBR(propagationPacked)),  // __bag._br: outgoing propagation baggage
-		attribute.String(AttrBREmit, encodeBR(emitPayload)),    // "_br": wire payload, kept iff checkpoint/leaf
-		attribute.String(AttrD, encodeBR(varintEncode(depth))), // "_d": wire depth, kept iff interior non-checkpoint
+		attribute.String(AttrBR, encodeBR(propagationPacked)),  // outgoing baggage
+		attribute.String(AttrBREmit, encodeBR(emitPayload)),    // exported by checkpoints and leaves
+		attribute.String(AttrD, encodeBR(varintEncode(depth))), // exported by interior non-checkpoints
 		attribute.Int("depth", depth),
 	)
 }
 
-// OnEnd implements SpanProcessor.OnEnd
+// OnEnd implements [sdktrace.SpanProcessor].
 func (p *PathBridgeProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
-	// Tomislav-RetCtx: honor SDK rejection/receipt decisions at export. One attribute read
-	// serves classification and conversion; the window's wire state is taken (and freed) here.
+	// The wire entry is taken (and freed) here. One Attributes call serves classification and
+	// encoding.
 	attrs := s.Attributes()
 	w := bridgeWires.take(s.SpanContext().SpanID())
-	if (w != nil) != p.checkpointRange.enabled() { // Tomislav-RetCtx: invariant (invariants.go)
+	if (w != nil) != p.checkpointRange.enabled() {
 		brokenRule("a bridge span has a wire entry exactly when the window is ranged (stored at OnStart)")
 	}
 	p.routeToPipeline(s, attrs, w, pathCheckpoint(s.SpanKind(), attrs, w))
 }
 
-// routeToPipeline classifies and buffers the span, capturing the shared
-// Resource on first use and counting per-priority received totals.
+// routeToPipeline counts the span, encodes it and buffers it by priority.
 func (p *PathBridgeProcessor) routeToPipeline(s sdktrace.ReadOnlySpan, attrs []attribute.KeyValue, w *bridgeWire, highPriority bool) {
 	atomic.AddInt64(&p.spansReceived, 1)
 	if highPriority {
@@ -524,10 +477,9 @@ func (p *PathBridgeProcessor) routeToPipeline(s sdktrace.ReadOnlySpan, attrs []a
 		atomic.AddInt64(&p.lpReceived, 1)
 	}
 	p.resourceOnce.Do(func() {
-		p.resource = resourceField(s.Resource()) // otlp_wire.go
+		p.resource = resourceField(s.Resource())
 	})
-	// Tomislav-RetCtx: the span's OTLP bytes, written once here (otlp_wire.go); `_br` / `_o` / `_d`
-	// come from the wire entry, the attributes through the policyPath strip list.
+	// `_br`, `_o` and `_d` come from the wire entry; policyPath drops the internal attributes.
 	entry := encodeSpan(s, attrs, w, highPriority, policyPath)
 	p.eventsLock.Lock()
 	if highPriority {
@@ -541,7 +493,7 @@ func (p *PathBridgeProcessor) routeToPipeline(s sdktrace.ReadOnlySpan, attrs []a
 	slog.Debug("🔴 Routed to pipeline", "span_name", s.Name(), "hp_buffer_size", hpSize, "lp_buffer_size", lpSize, "high_prio", highPriority)
 }
 
-// getConfigDiscoveryEndpoint converts the agent endpoint to the config discovery endpoint
+// getConfigDiscoveryEndpoint is the address of the collector's config discovery endpoint.
 func (p *PathBridgeProcessor) getConfigDiscoveryEndpoint() string {
 	if strings.Contains(p.agentEndpoint, ":") {
 		parts := strings.Split(p.agentEndpoint, ":")
@@ -553,9 +505,9 @@ func (p *PathBridgeProcessor) getConfigDiscoveryEndpoint() string {
 	return fmt.Sprintf("localhost:%d", p.configDiscoveryPort)
 }
 
-// parseCheckpointDistance extracts and parses the checkpoint distance (cpd) from the config map
+// parseCheckpointDistance reads the fixed checkpoint distance (cpd) from the config.
 func (p *PathBridgeProcessor) parseCheckpointDistance(config map[string]interface{}) int64 {
-	const defaultCPD = int64(1) // Default: every span is a checkpoint
+	const defaultCPD = int64(1) // every span is a checkpoint
 
 	if config == nil {
 		return defaultCPD
@@ -602,7 +554,7 @@ func (p *PathBridgeProcessor) parseCheckpointDistance(config map[string]interfac
 	return defaultCPD
 }
 
-// fetchFullConfig fetches the full config from the config discovery endpoint
+// fetchFullConfig reads the parameters from the config discovery endpoint and applies them.
 func (p *PathBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	config, err := p.fetchFullConfigFromEndpointWithRetries(ctx)
 	if err != nil {
@@ -610,7 +562,7 @@ func (p *PathBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	}
 
 	cpd := p.parseCheckpointDistance(config)
-	// Tomislav-RetCtx: validate reverse routing before publishing SDK config.
+	// Validate everything before applying anything.
 	policy, err := parseReversePolicy(config)
 	if err != nil {
 		return err
@@ -620,7 +572,7 @@ func (p *PathBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 		return err
 	}
 	if rangeConfig.enabled() {
-		cpd = 0 // No single fixed distance or global Bloom geometry in range mode.
+		cpd = 0 // range mode has no fixed distance or shared Bloom geometry
 	}
 
 	configJSON, err := json.MarshalIndent(config, "", "  ")
@@ -638,7 +590,7 @@ func (p *PathBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	p.configLock.Unlock()
 
 	if !rangeConfig.enabled() {
-		// Legacy fixed mode retains its original geometry and wire format.
+		// Fixed-distance mode: size the shared Bloom filter for the distance.
 		bm, bk := bloom.EstimateParameters(uint(pbBloomCapacity(int(cpd))), DefaultBloomFPRate)
 		BloomFilterM = bm
 		BloomFilterK = bk
@@ -654,7 +606,8 @@ func (p *PathBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	return nil
 }
 
-// fetchFullConfigFromEndpointWithRetries fetches config from the discovery endpoint with retries
+// fetchFullConfigFromEndpointWithRetries fetches the config, retrying while the collector is not
+// up yet.
 func (p *PathBridgeProcessor) fetchFullConfigFromEndpointWithRetries(ctx context.Context) (map[string]interface{}, error) {
 	configDiscoveryEndpoint := p.getConfigDiscoveryEndpoint()
 	url := fmt.Sprintf("http://%s/getFullConfig", configDiscoveryEndpoint)
@@ -723,7 +676,7 @@ func (p *PathBridgeProcessor) fetchFullConfigFromEndpointWithRetries(ctx context
 	return nil, fmt.Errorf("config discovery failed after 60 attempts")
 }
 
-// getConfigMap returns the config map, with thread-safe access
+// getConfigMap returns the config map.
 func (p *PathBridgeProcessor) getConfigMap() map[string]interface{} {
 	p.configLock.RLock()
 	defer p.configLock.RUnlock()
@@ -735,15 +688,14 @@ func (p *PathBridgeProcessor) getConfigMap() map[string]interface{} {
 	return result
 }
 
-// Shutdown implements SpanProcessor.Shutdown
+// Shutdown implements [sdktrace.SpanProcessor]. It flushes the buffers and waits for every export.
 func (p *PathBridgeProcessor) Shutdown(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	slog.Info("🔴 PathBridgeProcessor shutting down")
 
-	// Stop the background workers, then wait for in-flight export goroutines
-	// to drain before closing the gRPC client.
+	// processEvents flushes one last time; then wait for the exports.
 	close(p.stopChan)
 	p.wg.Wait()
 	p.exportWG.Wait()
@@ -758,7 +710,8 @@ func (p *PathBridgeProcessor) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// ForceFlush implements SpanProcessor.ForceFlush
+// ForceFlush implements [sdktrace.SpanProcessor]. It does nothing: spans are exported every
+// SBExportInterval.
 func (p *PathBridgeProcessor) ForceFlush(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()

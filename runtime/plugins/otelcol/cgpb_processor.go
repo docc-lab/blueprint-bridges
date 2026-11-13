@@ -1,4 +1,3 @@
-// Package otelcol implements a tracer [backend.Tracer] client interface for the OpenTelemetry collector.
 package otelcol
 
 import (
@@ -25,45 +24,35 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// CallGraphBridgeProcessor mirrors StructuralBridgeProcessor's
-// export/metrics architecture exactly — dual HP/LP buffers,
-// priority-homogeneous batched export with the "bridges-priority: hp|lp"
-// gRPC metadata header, retry-off client, and the full per-priority counter
-// set logged as a `cgpb_processor_metrics` line. The ONLY thing that
-// differs from SB is the breadcrumb composition in OnStart (CGPRB =
-// full-width-ckpt-anchored PCRB + a window-local hash array; mirrors
-// bridges/bridge/cgprb.go) and the `_d`/`_br` wire emission in
-// convertAttributes.
+// CallGraphBridgeProcessor is the call-graph path bridge (CGPB): PB plus a hash array (HA) per
+// window that records where the call path branches, so reconstruction can also place the
+// siblings in a window. Export works exactly as for PB.
 type CallGraphBridgeProcessor struct {
 	mu sync.RWMutex
 
-	// Tomislav-RetCtx: the OTLP connection (otlp_wire.go); the export bytes are written here.
 	conn *otlpConn
 
-	// Configuration
 	agentEndpoint string
 	ancestryMode  AncestryMode
 
 	bloomFilter *bloom.BloomFilter
 
-	// Background processing
 	stopChan chan struct{}
 	wg       sync.WaitGroup
 
-	// Tracks in-flight per-batch export goroutines so Shutdown can wait
-	// for them to drain before closing the gRPC client.
+	// exportWG tracks in-flight exports, so Shutdown can wait for them before closing the connection.
 	exportWG sync.WaitGroup
 
-	// Two physical buffers, separated by CP/LP classification at OnEnd.
-	hpBuf      []wireSpan // Tomislav-RetCtx: encoded spans (otlp_wire.go)
+	// Ended spans, encoded, by priority. flushBuffer sends the high-priority ones first.
+	hpBuf      []wireSpan
 	lpBuf      []wireSpan
 	eventsLock sync.Mutex
 
-	// Shared Resource proto for every export, captured lazily on first OnEnd.
-	resource     []byte // the encoded ResourceSpans.resource field (otlp_wire.go, resourceField)
+	// resource is the encoded Resource, captured on the first OnEnd.
+	resource     []byte
 	resourceOnce sync.Once
 
-	// Per-batch / per-priority counters (all atomic). Mirrors SB exactly.
+	// Counters, updated atomically; see PathBridgeProcessor.
 	spansReceived   int64
 	spansFlushed    int64
 	spansSent       int64
@@ -82,23 +71,24 @@ type CallGraphBridgeProcessor struct {
 	cpDropped       int64
 	lpDropped       int64
 
-	// Config discovery
+	// Parameters read from the collector's config discovery endpoint.
 	configDiscoveryPort int
 	httpClient          *http.Client
 	configMap           map[string]interface{}
 	configLock          sync.RWMutex
 
-	// Checkpoint distance (parsed from config, default: 1)
+	// checkpointDistance is used in fixed-distance mode; a set checkpointRange selects range mode.
 	checkpointDistance int64
 	checkpointRange    checkpointRange
 	reversePolicy      reversePolicy
 }
 
-// Darby: this gets run once per service (when initialized)
+// NewCallGraphBridgeProcessor creates a CGPB processor. It exports to the collector agent on the host
+// of agentEndpoint and reads its parameters from the config discovery endpoint on
+// configDiscoveryPort.
 func NewCallGraphBridgeProcessor(ctx context.Context, agentEndpoint string, configDiscoveryPort string) (*CallGraphBridgeProcessor, error) {
 	slog.Info("🔵 Creating new CallGraphBridgeProcessor", "agentEndpoint", agentEndpoint)
 
-	// Extract host from agent endpoint
 	var host string
 	if strings.Contains(agentEndpoint, ":") {
 		parts := strings.Split(agentEndpoint, ":")
@@ -107,18 +97,14 @@ func NewCallGraphBridgeProcessor(ctx context.Context, agentEndpoint string, conf
 		}
 	}
 	if host == "" {
-		host = "localhost" // Fallback to localhost
+		host = "localhost"
 	}
 
-	// Create endpoint
 	endpoint := fmt.Sprintf("%s:4317", host)
 
 	slog.Info("🔵 Using endpoint", "endpoint", endpoint)
 
-	// Tomislav-RetCtx: a plain gRPC connection; the processor writes the OTLP bytes itself
-	// (otlp_wire.go) instead of handing protobuf objects to the exporter client.  The exporter's
-	// retry (OTLP_RETRY) has no counterpart on this path: every campaign runs with it off, and the
-	// 1 s export deadline never left room for its 5 s first retry anyway.
+	// A plain gRPC connection: the processor encodes the OTLP request itself (otlp_wire.go).
 	conn, err := dialOTLP(endpoint)
 	if err != nil {
 		slog.Error("❌ Failed to open the OTLP connection", "error", err)
@@ -130,14 +116,12 @@ func NewCallGraphBridgeProcessor(ctx context.Context, agentEndpoint string, conf
 
 	slog.Info("✅ CallGraphBridgeProcessor created successfully")
 
-	// Parse config discovery port
 	configDiscoveryPortInt, err := strconv.Atoi(configDiscoveryPort)
 	if err != nil {
 		slog.Error("❌ Failed to convert configDiscoveryPort to int", "error", err)
 		return nil, fmt.Errorf("failed to convert configDiscoveryPort to int: %w", err)
 	}
 
-	// Create HTTP client for config discovery
 	httpClient := &http.Client{
 		Timeout: 10 * time.Second,
 	}
@@ -151,24 +135,21 @@ func NewCallGraphBridgeProcessor(ctx context.Context, agentEndpoint string, conf
 		configDiscoveryPort: configDiscoveryPortInt,
 		httpClient:          httpClient,
 		configMap:           make(map[string]interface{}),
-		checkpointDistance:  1, // Default: every span is a checkpoint
+		checkpointDistance:  1, // until the config says otherwise
 	}
 
 	slog.Info("🔵 Ancestry mode configured", "mode", AncestryModePB)
 
-	// CGPRB bloom geometry: capacity = cpd-1 (PCRB window), fp =
-	// DefaultBloomFPRate. checkpointDistance is the default (1) here; re-sized
-	// in fetchFullConfig once the real cpd is discovered.
+	// Bloom geometry for the default distance; fetchFullConfig resizes it for the configured one.
 	expectedElements := uint(pbBloomCapacity(int(processor.checkpointDistance)))
 	if expectedElements == 0 {
-		expectedElements = 1 // Ensure at least 1 element
+		expectedElements = 1
 	}
 	calculatedM, calculatedK := bloom.EstimateParameters(expectedElements, DefaultBloomFPRate)
 	BloomFilterM = calculatedM
 	BloomFilterK = calculatedK
 	backend.SetRTBloomParams(calculatedM, calculatedK)
 
-	// Fetch full config from config discovery endpoint
 	slog.Info("🔵 About to fetch full config")
 	if err := processor.fetchFullConfig(ctx); err != nil {
 		if errors.Is(err, errInvalidCheckpointRange) || errors.Is(err, errInvalidReversePolicy) {
@@ -181,20 +162,16 @@ func NewCallGraphBridgeProcessor(ctx context.Context, agentEndpoint string, conf
 		slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
 	}
 
-	// Start background worker for batch export
 	processor.wg.Add(1)
 	go processor.processEvents()
 
-	// Start the metrics logger goroutine.
 	processor.wg.Add(1)
 	go processor.logMetricsLoop()
 
 	return processor, nil
 }
 
-// logMetricsLoop emits one slog.Info line per SBMetricsInterval with the
-// full per-priority counter snapshot. Tail via
-// `kubectl logs deploy/<svc> | grep cgpb_processor_metrics`.
+// logMetricsLoop logs the counters every SBMetricsInterval until stopChan is closed.
 func (p *CallGraphBridgeProcessor) logMetricsLoop() {
 	defer p.wg.Done()
 	t := time.NewTicker(SBMetricsInterval)
@@ -209,8 +186,7 @@ func (p *CallGraphBridgeProcessor) logMetricsLoop() {
 	}
 }
 
-// logMetrics emits one snapshot of every counter plus the current
-// per-priority in-memory buffer depths.
+// logMetrics logs every counter and the buffer depths.
 func (p *CallGraphBridgeProcessor) logMetrics() {
 	p.eventsLock.Lock()
 	hpDepth := len(p.hpBuf)
@@ -237,12 +213,11 @@ func (p *CallGraphBridgeProcessor) logMetrics() {
 		"hp_buffer_depth", hpDepth,
 		"lp_buffer_depth", lpDepth,
 	)
-	// Tomislav-RetCtx: SDK retry gauges on their own line (sdk_retry.go; parsed as BRIDGES_RETRY)
+	// The retry gauges go on a line of their own.
 	sdkRetry.logMetrics()
 }
 
-// categorizeSendError increments the appropriate per-code counter for a
-// failed UploadTraces.
+// categorizeSendError counts a failed export under its gRPC status code.
 func (p *CallGraphBridgeProcessor) categorizeSendError(err error) {
 	switch status.Code(err) {
 	case codes.DeadlineExceeded:
@@ -258,8 +233,7 @@ func (p *CallGraphBridgeProcessor) categorizeSendError(err error) {
 	}
 }
 
-// processEvents runs in the background to periodically drain the event
-// buffer and dispatch batches for export.
+// processEvents flushes the buffers every SBExportInterval, and once more when stopped.
 func (p *CallGraphBridgeProcessor) processEvents() {
 	defer p.wg.Done()
 
@@ -277,9 +251,8 @@ func (p *CallGraphBridgeProcessor) processEvents() {
 	}
 }
 
-// flushBuffer atomically snaps both priority buffers, then dispatches HP
-// chunks first, then LP chunks. Each chunk carries one priority class
-// (never mixed) tagged with a "bridges-priority: hp|lp" gRPC metadata header.
+// flushBuffer exports both buffers, high priority first. Each batch holds one priority and says which
+// in the bridges-priority gRPC metadata.
 func (p *CallGraphBridgeProcessor) flushBuffer() {
 	p.eventsLock.Lock()
 	hpSnap := p.hpBuf
@@ -298,25 +271,23 @@ func (p *CallGraphBridgeProcessor) flushBuffer() {
 	p.dispatchPriority(lpSnap, false)
 }
 
-// dispatchPriority groups one priority class's snapshot by scope, chunks
-// each scope group at SBBatchSize, and spawns one goroutine per chunk.  Each chunk is encoded as
-// one ExportTraceServiceRequest (otlp_wire.go, buildBatch): one ResourceSpans (the shared
-// Resource) wrapping one ScopeSpans wrapping up to SBBatchSize spans.
+// dispatchPriority exports one priority's spans in batches of at most SBBatchSize, each in its own
+// goroutine.
 func (p *CallGraphBridgeProcessor) dispatchPriority(snap []wireSpan, isHP bool) {
 	if len(snap) == 0 {
 		return
 	}
-	batches(p.resource, snap, SBBatchSize, func(batch *wireBatch) { // otlp_wire.go
+	batches(p.resource, snap, SBBatchSize, func(batch *wireBatch) {
 		p.exportWG.Add(1)
 		go p.exportBatch(batch, isHP)
 	})
 }
 
-// exportBatch sends one priority-homogeneous batch and updates counters
-// based on outcome. On failure the spans are permanently dropped (no retry).
+// exportBatch sends one batch and counts the outcome. A refused batch is dropped, or retried once if
+// the retry policy says so (sdk_retry.go).
 func (p *CallGraphBridgeProcessor) exportBatch(batch *wireBatch, isHP bool) {
 	defer p.exportWG.Done()
-	// Tomislav-RetCtx: SDK one-shot retry policy (sdk_retry.go; BRIDGES_RETRY, default off).
+	// At most one retry, per BRIDGES_RETRY (default off).
 	if !isHP && sdkRetry.suppressLP() {
 		sdkRetry.lpSuppressed.Add(batch.n)
 		p.batchDropped(batch, isHP, errLPSuppressed)
@@ -345,7 +316,7 @@ func (p *CallGraphBridgeProcessor) exportBatch(batch *wireBatch, isHP bool) {
 	p.batchSent(batch.n, isHP)
 }
 
-// batchDropped accounts one batch that will not be delivered (census included).
+// batchDropped counts a batch that will not be delivered and records its trace IDs.
 func (p *CallGraphBridgeProcessor) batchDropped(batch *wireBatch, isHP bool, err error) {
 	atomic.AddInt64(&p.batchesDropped, 1)
 	atomic.AddInt64(&p.spansDropped, batch.n)
@@ -355,11 +326,11 @@ func (p *CallGraphBridgeProcessor) batchDropped(batch *wireBatch, isHP bool, err
 		atomic.AddInt64(&p.lpDropped, batch.n)
 	}
 	p.categorizeSendError(err)
-	recordRefusedIDs(batch.traceIDs(), isHP) // Tomislav-RetCtx: census of trace IDs in the dropped batch
+	recordRefusedIDs(batch.traceIDs(), isHP)
 	slog.Error("Failed to send batch", "error", err, "count", batch.n, "hp", isHP)
 }
 
-// batchSent accounts one delivered batch.
+// batchSent counts a delivered batch.
 func (p *CallGraphBridgeProcessor) batchSent(n int64, isHP bool) {
 	atomic.AddInt64(&p.batchesSent, 1)
 	atomic.AddInt64(&p.spansSent, n)
@@ -371,10 +342,8 @@ func (p *CallGraphBridgeProcessor) batchSent(n int64, isHP bool) {
 	slog.Debug("Sent batch", "count", n, "hp", isHP)
 }
 
-// sendData sends one encoded, priority-homogeneous batch with the
-// "bridges-priority: hp|lp" gRPC metadata header attached. The
-// collector-side priority processor reads this header to admit or refuse
-// the batch in one O(1) decision.
+// sendData exports one batch, marked with its priority in the bridges-priority gRPC metadata so the
+// collector's priority processor can admit or refuse it without decoding it.
 func (p *CallGraphBridgeProcessor) sendData(req []byte, isHP bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), grpcDeadline)
 	defer cancel()
@@ -385,20 +354,19 @@ func (p *CallGraphBridgeProcessor) sendData(req []byte, isHP bool) error {
 	}
 	ctx = metadata.AppendToOutgoingContext(ctx, MetadataPriorityKey, priorityVal)
 
-	if err := p.conn.export(ctx, req); err != nil { // otlp_wire.go
+	if err := p.conn.export(ctx, req); err != nil {
 		slog.Error("❌ Failed to send data", "error", err, "hp", isHP)
 		return fmt.Errorf("failed to send data: %w", err)
 	}
 	return nil
 }
 
-// Tomislav-RetCtx: startAttributeBaggage tells NewOTCollectorTracer (trace.go) whether OnStart
-// adds "__bag." attributes: as for PB, only the legacy fixed-cpd mode does.
+// startAttributeBaggage reports whether OnStart adds "__bag." attributes: only the legacy
+// fixed-distance mode does.
 func (p *CallGraphBridgeProcessor) startAttributeBaggage() bool { return !p.checkpointRange.enabled() }
 
-// OnStart implements SpanProcessor.OnStart
+// OnStart implements [sdktrace.SpanProcessor].
 func (p *CallGraphBridgeProcessor) OnStart(parent context.Context, s sdktrace.ReadWriteSpan) {
-	// Tomislav-RetCtx: ranged windows preserve Bloom and trailing HA boundaries.
 	if p.checkpointRange.enabled() {
 		onStartCheckpointWindow(parent, s, p.checkpointRange, true)
 		return
@@ -406,15 +374,10 @@ func (p *CallGraphBridgeProcessor) OnStart(parent context.Context, s sdktrace.Re
 	p.onStartFixed(parent, s)
 }
 
-// onStartFixed is OnStart for the legacy fixed-cpd configuration.  Tomislav-RetCtx: it is its own
-// function only to keep OnStart's stack frame small.  Go sizes a function's frame for everything in
-// it, so while this code was inline, every span start in ranged mode (which returns above) also
-// reserved its 1.3 KB, and on goroutines that start with a small stack that is what made the stack
-// grow (be copied) during the span start (utils/grpc_interceptors/README.md, "Stack growth").
+// onStartFixed is OnStart in the legacy fixed-distance mode. It is a separate function so that
+// OnStart's stack frame stays small in range mode.
 func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktrace.ReadWriteSpan) {
-	// Canonical call-graph path bridge (CGPRB = full-width-ckpt-anchored PCRB + a window-
-	// local hash array). Decode inbound baggage `_br` =
-	// varint(absolute depth) || ckpt(8) || propagated bloom (fixed ceil(m/8)) || HA.
+	// The parent's `_br` is varint(depth) || ckpt(8) || bloom || HA; the bloom has a fixed width.
 	bloomLen := int((BloomFilterM + 7) / 8)
 	var (
 		hasParent        bool
@@ -442,8 +405,7 @@ func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktra
 		cpd = 1
 	}
 
-	// Absolute depth (root=0); inherited ckpt anchor; INHERITED (pre-self)
-	// window bloom.
+	// The window inherited from the parent.
 	var depth int
 	var inheritedCkpt [8]byte
 	var bf *bloom.BloomFilter
@@ -456,12 +418,9 @@ func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktra
 		bf = bloom.New(BloomFilterM, BloomFilterK)
 	}
 
-	// HA (CGPRB rules): the 1st-started child inherits the parent's window HA;
-	// the 2nd-started child starts FRESH and appends one branch record
-	// (parent_span_id(8) || varint(absolute depth)); 3rd+ carry none. seqNum is
-	// set by the OT client wrapper (per-parent atomic child counter). An entry
-	// is thus never duplicated across a fan-out — one record per branching
-	// parent asserts the branch exists.
+	// The HA records each branching parent once: the first child to start inherits the parent's HA,
+	// the second starts a new one with a single entry (parent span ID, depth), and later children
+	// carry none. seqNum is the child's ordinal, set by the instrumentation.
 	seqNum, _ := parent.Value("seqNum").(int)
 	var ha []byte
 	if hasParent && seqNum == 1 {
@@ -478,13 +437,11 @@ func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktra
 	var ownCkpt [8]byte
 	copy(ownCkpt[:], sid8[:])
 
-	// Emit payload (checkpoints + leaves): names the PREVIOUS checkpoint
-	// (inheritedCkpt), the INHERITED pre-self window bloom, and the window HA.
+	// Checkpoints and leaves export the inherited window and its HA.
 	emitPayload := packCGPRBBR(depth, inheritedCkpt, bf.Bytes(), ha)
 
-	// Propagation + priority. Checkpoint re-roots ckpt→own and resets BOTH the
-	// bloom AND the HA to empty (window-scoped). Non-checkpoint keeps anchor,
-	// adds self to bloom, carries the HA forward (only the 1st child inherits it).
+	// What the children inherit. A checkpoint anchors a new window on itself, with an empty filter
+	// and HA; any other span adds itself to the filter and passes the HA on.
 	priority := 0
 	var propCkpt [8]byte
 	var propBloomBytes []byte
@@ -496,9 +453,7 @@ func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktra
 		propHA = nil
 	} else {
 		propCkpt = inheritedCkpt
-		// Span IDs are already uniformly random -> use them directly as bloom hash
-		// material (no MurmurHash). Same FPR, ~31% cheaper Add. RAW 8 bytes, not the
-		// hex string. See notes/bloom_prehashed_spanid.md.
+		// Span IDs are random, so they serve as the filter's hash input directly.
 		bf.AddPrehashed(sid8[:])
 		propBloomBytes = bf.Bytes()
 	}
@@ -506,27 +461,26 @@ func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktra
 
 	s.SetAttributes(
 		attribute.Int(AttrBagPrio, priority),
-		attribute.String(AttrBR, encodeBR(propagationPacked)),  // __bag._br: outgoing propagation baggage
-		attribute.String(AttrBREmit, encodeBR(emitPayload)),    // "_br": wire payload, kept iff checkpoint/leaf
-		attribute.String(AttrD, encodeBR(varintEncode(depth))), // "_d": wire depth, kept iff interior non-checkpoint
+		attribute.String(AttrBR, encodeBR(propagationPacked)),  // outgoing baggage
+		attribute.String(AttrBREmit, encodeBR(emitPayload)),    // exported by checkpoints and leaves
+		attribute.String(AttrD, encodeBR(varintEncode(depth))), // exported by interior non-checkpoints
 		attribute.Int("depth", depth),
 	)
 }
 
-// OnEnd implements SpanProcessor.OnEnd
+// OnEnd implements [sdktrace.SpanProcessor].
 func (p *CallGraphBridgeProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
-	// Tomislav-RetCtx: honor SDK rejection/receipt decisions at export. One attribute read
-	// serves classification and conversion; the window's wire state is taken (and freed) here.
+	// The wire entry is taken (and freed) here. One Attributes call serves classification and
+	// encoding.
 	attrs := s.Attributes()
 	w := bridgeWires.take(s.SpanContext().SpanID())
-	if (w != nil) != p.checkpointRange.enabled() { // Tomislav-RetCtx: invariant (invariants.go)
+	if (w != nil) != p.checkpointRange.enabled() {
 		brokenRule("a bridge span has a wire entry exactly when the window is ranged (stored at OnStart)")
 	}
 	p.routeToPipeline(s, attrs, w, pathCheckpoint(s.SpanKind(), attrs, w))
 }
 
-// routeToPipeline classifies and buffers the span, capturing the shared
-// Resource on first use and counting per-priority received totals.
+// routeToPipeline counts the span, encodes it and buffers it by priority.
 func (p *CallGraphBridgeProcessor) routeToPipeline(s sdktrace.ReadOnlySpan, attrs []attribute.KeyValue, w *bridgeWire, highPriority bool) {
 	atomic.AddInt64(&p.spansReceived, 1)
 	if highPriority {
@@ -535,10 +489,9 @@ func (p *CallGraphBridgeProcessor) routeToPipeline(s sdktrace.ReadOnlySpan, attr
 		atomic.AddInt64(&p.lpReceived, 1)
 	}
 	p.resourceOnce.Do(func() {
-		p.resource = resourceField(s.Resource()) // otlp_wire.go
+		p.resource = resourceField(s.Resource())
 	})
-	// Tomislav-RetCtx: the span's OTLP bytes, written once here (otlp_wire.go); `_br` / `_o` / `_d`
-	// come from the wire entry, the attributes through the policyCallGraph strip list.
+	// `_br`, `_o` and `_d` come from the wire entry; policyCallGraph drops the internal attributes.
 	entry := encodeSpan(s, attrs, w, highPriority, policyCallGraph)
 	p.eventsLock.Lock()
 	if highPriority {
@@ -552,7 +505,7 @@ func (p *CallGraphBridgeProcessor) routeToPipeline(s sdktrace.ReadOnlySpan, attr
 	slog.Debug("🔴 Routed to pipeline", "span_name", s.Name(), "hp_buffer_size", hpSize, "lp_buffer_size", lpSize, "high_prio", highPriority)
 }
 
-// getConfigDiscoveryEndpoint converts the agent endpoint to the config discovery endpoint
+// getConfigDiscoveryEndpoint is the address of the collector's config discovery endpoint.
 func (p *CallGraphBridgeProcessor) getConfigDiscoveryEndpoint() string {
 	if strings.Contains(p.agentEndpoint, ":") {
 		parts := strings.Split(p.agentEndpoint, ":")
@@ -564,9 +517,9 @@ func (p *CallGraphBridgeProcessor) getConfigDiscoveryEndpoint() string {
 	return fmt.Sprintf("localhost:%d", p.configDiscoveryPort)
 }
 
-// parseCheckpointDistance extracts and parses the checkpoint distance (cpd) from the config map
+// parseCheckpointDistance reads the fixed checkpoint distance (cpd) from the config.
 func (p *CallGraphBridgeProcessor) parseCheckpointDistance(config map[string]interface{}) int64 {
-	const defaultCPD = int64(1) // Default: every span is a checkpoint
+	const defaultCPD = int64(1) // every span is a checkpoint
 
 	if config == nil {
 		return defaultCPD
@@ -613,7 +566,7 @@ func (p *CallGraphBridgeProcessor) parseCheckpointDistance(config map[string]int
 	return defaultCPD
 }
 
-// fetchFullConfig fetches the full config from the config discovery endpoint
+// fetchFullConfig reads the parameters from the config discovery endpoint and applies them.
 func (p *CallGraphBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	config, err := p.fetchFullConfigFromEndpointWithRetries(ctx)
 	if err != nil {
@@ -621,7 +574,7 @@ func (p *CallGraphBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	}
 
 	cpd := p.parseCheckpointDistance(config)
-	// Tomislav-RetCtx: validate reverse routing before publishing SDK config.
+	// Validate everything before applying anything.
 	policy, err := parseReversePolicy(config)
 	if err != nil {
 		return err
@@ -631,7 +584,7 @@ func (p *CallGraphBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 		return err
 	}
 	if rangeConfig.enabled() {
-		cpd = 0 // No single fixed distance or global Bloom geometry in range mode.
+		cpd = 0 // range mode has no fixed distance or shared Bloom geometry
 	}
 
 	configJSON, err := json.MarshalIndent(config, "", "  ")
@@ -649,7 +602,7 @@ func (p *CallGraphBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	p.configLock.Unlock()
 
 	if !rangeConfig.enabled() {
-		// Legacy fixed mode retains its original geometry and wire format.
+		// Fixed-distance mode: size the shared Bloom filter for the distance.
 		bm, bk := bloom.EstimateParameters(uint(pbBloomCapacity(int(cpd))), DefaultBloomFPRate)
 		BloomFilterM = bm
 		BloomFilterK = bk
@@ -665,7 +618,8 @@ func (p *CallGraphBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	return nil
 }
 
-// fetchFullConfigFromEndpointWithRetries fetches config from the discovery endpoint with retries
+// fetchFullConfigFromEndpointWithRetries fetches the config, retrying while the collector is not
+// up yet.
 func (p *CallGraphBridgeProcessor) fetchFullConfigFromEndpointWithRetries(ctx context.Context) (map[string]interface{}, error) {
 	configDiscoveryEndpoint := p.getConfigDiscoveryEndpoint()
 	url := fmt.Sprintf("http://%s/getFullConfig", configDiscoveryEndpoint)
@@ -734,7 +688,7 @@ func (p *CallGraphBridgeProcessor) fetchFullConfigFromEndpointWithRetries(ctx co
 	return nil, fmt.Errorf("config discovery failed after 60 attempts")
 }
 
-// getConfigMap returns the config map, with thread-safe access
+// getConfigMap returns the config map.
 func (p *CallGraphBridgeProcessor) getConfigMap() map[string]interface{} {
 	p.configLock.RLock()
 	defer p.configLock.RUnlock()
@@ -746,15 +700,14 @@ func (p *CallGraphBridgeProcessor) getConfigMap() map[string]interface{} {
 	return result
 }
 
-// Shutdown implements SpanProcessor.Shutdown
+// Shutdown implements [sdktrace.SpanProcessor]. It flushes the buffers and waits for every export.
 func (p *CallGraphBridgeProcessor) Shutdown(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	slog.Info("🔴 CallGraphBridgeProcessor shutting down")
 
-	// Stop the background workers, then wait for in-flight export goroutines
-	// to drain before closing the gRPC client.
+	// processEvents flushes one last time; then wait for the exports.
 	close(p.stopChan)
 	p.wg.Wait()
 	p.exportWG.Wait()
@@ -769,7 +722,8 @@ func (p *CallGraphBridgeProcessor) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// ForceFlush implements SpanProcessor.ForceFlush
+// ForceFlush implements [sdktrace.SpanProcessor]. It does nothing: spans are exported every
+// SBExportInterval.
 func (p *CallGraphBridgeProcessor) ForceFlush(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
