@@ -60,9 +60,9 @@ rev2` creates `frontend-service-hotel-sb-esrev2-ctr` and
 
 | Wiring spec | SDK processor | Jaeger storage |
 | --- | --- | --- |
-| `docker_pb`, `docker_pb_es` | Path bridge | Memory / Elasticsearch |
-| `docker_cgpb`, `docker_cgpb_es` | Call-graph path bridge | Memory / Elasticsearch |
-| `docker_sb`, `docker_sb_es` | Structural bridge | Memory / Elasticsearch |
+| `docker_pb`, `docker_pb_es` | Path bridge (P-Bridge) | Memory / Elasticsearch |
+| `docker_cgpb`, `docker_cgpb_es` | Call-graph bridge (CG-Bridge) | Memory / Elasticsearch |
+| `docker_sb`, `docker_sb_es` | Structural bridge (S-Bridge) | Memory / Elasticsearch |
 | `docker_v`, `docker_v_es` | Vanilla | Memory / Elasticsearch |
 | `docker_rc_es` | Random-checkpoint control | Elasticsearch |
 

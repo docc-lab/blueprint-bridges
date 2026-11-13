@@ -48,9 +48,9 @@ type sbBufEntry struct {
 	isCheckpoint bool
 }
 
-// StructuralBridgeProcessor is the structural bridge (SB): the CGPB window plus start ordinals and
-// end events, enough to reconstruct the order of siblings as well as the call path (see OnStart).
-// Export works as for PB.
+// StructuralBridgeProcessor is the structural bridge (S-Bridge): the CGPB window plus start
+// ordinals and end events, enough to reconstruct the order of siblings as well as the call path
+// (see OnStart). Export works as for PB.
 type StructuralBridgeProcessor struct {
 	mu sync.RWMutex
 

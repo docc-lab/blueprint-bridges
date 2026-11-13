@@ -24,9 +24,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// CallGraphBridgeProcessor is the call-graph path bridge (CGPB): PB plus a hash array (HA) per
-// window that records where the call path branches, so reconstruction can also place the
-// siblings in a window. Export works exactly as for PB.
+// CallGraphBridgeProcessor is the call-graph bridge (CG-Bridge): PB plus a hash array (HA) of
+// fan-out witnesses per window, which records where the call path branches, so reconstruction can
+// also place the siblings in a window. Export works exactly as for PB.
 type CallGraphBridgeProcessor struct {
 	mu sync.RWMutex
 

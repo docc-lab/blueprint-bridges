@@ -81,8 +81,10 @@ instead, set `OT_GRPC_MODE=wrapper` when compiling: `InstrumentGRPC` and `Instru
 
 ### Choosing the bridge
 
-The tracing has one variant per bridge kind: vanilla OpenTelemetry tracing, or one of the
-checkpointing bridges (PB, CGPB, SB). The kind is chosen twice:
+The tracing has one variant per bridge kind: vanilla OpenTelemetry tracing, or one of the bridges:
+the path bridge (P-Bridge, `pb`), the call-graph bridge (CG-Bridge, `cgpb`) or the structural bridge
+(S-Bridge, `sb`). The [README](../../README.md#bridges) describes what each one preserves. The kind
+is chosen twice:
 
 * **At build time**, for the instrumentation, by the `OT_BRIDGE` environment variable of the
   compiler: `v` (or `vanilla`), `pb` (or `path`, `rc`, or empty), `cgpb` or `sb`. Any other value is
@@ -107,6 +109,10 @@ OT_BRIDGE=sb go run main.go -w docker_sb_es_bd -o build
 ```
 
 ### What happens on a call
+
+Each call carries a *forward context* down the call path: the span context and the baggage, which
+holds the bridge's truss. With `REVERSE_TRUSS=on`, each response carries a *reverse context* back
+up, which holds upward trusses.
 
 On the **caller** side, the client interceptor:
 
@@ -143,7 +149,7 @@ the reverse context when the handler starts writing the response.
 | Variable | Where | Meaning |
 |---|---|---|
 | `BRIDGE_KIND` | every traced process | span processor kind; see [Choosing the bridge](#choosing-the-bridge) |
-| `REVERSE_TRUSS` | every traced process | `on` enables the reverse context (responses carry trusses back up the call path) |
+| `REVERSE_TRUSS` | every traced process | `on` enables upward trusses: responses carry trusses back up the call path, in the reverse context |
 | `OTEL_SAMPLE_RATIO` | every traced process | head sampling ratio in [0,1]; unset samples everything |
 | `GRPC_STREAM_WORKERS` | gRPC servers | worker goroutines that reuse their stacks across calls; default 32 or `GOMAXPROCS`, whichever is larger; `0` turns them off |
 

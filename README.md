@@ -1,14 +1,21 @@
 # Blueprint Bridges
 
-Blueprint Bridges adds trace checkpointing to the OpenTelemetry tracing of
-[Blueprint](https://github.com/blueprint-uservices/blueprint), a compiler for microservice
-applications.
+Blueprint Bridges implements *bridges*, a primitive for distributed tracing, in OpenTelemetry. It
+is built on [Blueprint](https://github.com/blueprint-uservices/blueprint), a compiler for
+microservice applications.
 
-When a tracing pipeline is overloaded it drops spans, and a trace that has lost spans can no longer
-be pieced together. The span processors in this repository, the *bridges*, export a small share of
-spans as high-priority *checkpoints*. Each checkpoint carries a compact record of the call path
-around it, enough to place the spans that survive between checkpoints. The collector can then shed
-low-priority spans first and the traces remain reconstructable.
+Tracing infrastructures lose trace records under load, and the traces they store are then often
+fragments of a request's workflow, separated by *holes* of missing records. Tools that depend on a
+trace's topology, from critical-path analysis to autoscaling, are misled by them. Bridges let trace
+fragments be reconnected across holes:
+
+* Services propagate small amounts of ancestry data, *trusses*, with each request, in the trace
+  context's baggage.
+* A truss only has to be stored reliably once. Every few hops a span becomes a *checkpoint*, exports
+  the truss it has accumulated, and starts a new one. The collector protects checkpoints and sheds
+  other spans first when it is overloaded.
+* From the surviving fragments and checkpoints, a reconstructor reconnects the fragments and marks
+  where data was lost.
 
 This repository is a fork of Blueprint. Blueprint's compiler, plugins and applications work as
 documented in its [user manual](docs/manual).
@@ -17,8 +24,8 @@ documented in its [user manual](docs/manual).
 
 | Path | Contents |
 |---|---|
-| [`runtime/plugins/otelcol`](runtime/plugins/otelcol) | The span processors: the bridges, a vanilla baseline, the response path and the OTLP export |
-| [`runtime/core/backend`](runtime/core/backend) | The trace carrier and the reverse context, shared by the instrumentation and the processors |
+| [`runtime/plugins/otelcol`](runtime/plugins/otelcol) | The span processors: the bridges, a vanilla baseline, upward trusses and the OTLP export |
+| [`runtime/core/backend`](runtime/core/backend) | The trace carrier and the reverse context that holds upward trusses, shared by the instrumentation and the processors |
 | [`runtime/plugins/opentelemetry/interceptors`](runtime/plugins/opentelemetry/interceptors) | Tracing instrumentation as gRPC interceptors and HTTP middleware |
 | [`plugins/opentelemetry`](plugins/opentelemetry) | Wiring functions that instrument services, and the generated wrapper instrumentation |
 | [`plugins/otelcol`](plugins/otelcol) | Deploys the OpenTelemetry Collector the processors export to |
@@ -33,21 +40,31 @@ The other applications from Blueprint (Sock Shop, Train Ticket and the greeter e
 
 ## Bridges
 
-| Processor | `BRIDGE_KIND` | What a checkpoint records |
-|---|---|---|
-| Vanilla | `v` | No checkpoints: plain OpenTelemetry export, the baseline |
-| Path bridge (PB) | `pb` | The checkpoint above it and a Bloom filter of the spans in between |
-| Call-graph path bridge (CGPB) | `cgpb` | PB, plus the spans where the call path branches |
-| Structural bridge (SB) | `sb` | CGPB, plus the order in which siblings started and ended |
+There are three kinds of bridge. Each preserves more of the topology inside holes than the one
+before it, and costs more:
 
-Checkpoints are spaced a configurable number of hops apart, the checkpoint distance. The bridges
-export their spans in separate high- and low-priority batches, marked with the `bridges-priority`
-gRPC metadata. With `REVERSE_TRUSS=on`, responses also carry a *reverse context* back up the call
-path, so a checkpoint can be exported by an ancestor instead of the span that produced it.
+| Bridge | `BRIDGE_KIND` | Preserves | Truss contents |
+|---|---|---|---|
+| Path bridge (P-Bridge) | `pb` | Connectivity: which fragments belong together, along which path | The last checkpoint, depth, and a Bloom filter of the ancestors since that checkpoint |
+| Call-graph bridge (CG-Bridge) | `cgpb` | The call graph, without the order of calls | P-Bridge, plus *fan-out witnesses* that record where the call path branches |
+| Structural bridge (S-Bridge) | `sb` | The call graph and the order of sibling calls, for critical-path analysis | CG-Bridge, plus the order in which siblings started and ended |
 
-The processors read their parameters (checkpoint distance, reverse-path policy) from the collector
-when they start, and the collector admits or refuses each batch by its priority. That collector
-component is a processor for the OpenTelemetry Collector, maintained in a separate repository.
+Vanilla OpenTelemetry tracing (`v`) runs on the same export path and serves as the baseline.
+
+* **Vertical trusses** travel down the call path with requests. The S-Bridge also uses *orthogonal
+  trusses*, which pass the order in which siblings ended on to later spans.
+* **Upward trusses** travel back up the call path in responses (`REVERSE_TRUSS=on`). Leaf services
+  would otherwise have to checkpoint every truss that reaches them; instead, an ancestor checkpoints
+  it. A policy picks the ancestor: a TTL, a fixed probability, or a probability that depends on
+  depth.
+* **Checkpoints** are placed a checkpoint distance apart. The distance is fixed, or drawn at random
+  from a range so that checkpoints do not always land on the same services. Spans are exported in
+  separate checkpoint and non-checkpoint batches, marked with the `bridges-priority` gRPC metadata.
+
+The span processors read their parameters (checkpoint distance, upward-truss policy) from the
+collector when they start. The collector side, which admits checkpoints and sheds other spans first
+under memory pressure, is a set of OpenTelemetry Collector components maintained in a separate
+repository. Trace reconstruction is not part of this repository.
 
 ## Getting started
 

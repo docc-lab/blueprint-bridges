@@ -232,7 +232,7 @@ def parser():
     p.add_argument("--gc", choices=tuple(GC_MODES), default="forced")
     p.add_argument("--rpc-timeout", default="5s")
     p.add_argument("--sample-ratio", type=float, help="OTel head sampling ratio, between 0 and 1")
-    p.add_argument("--reverse-truss", action="store_true", help="Enable reverse checkpoints, consuming them at frontend")
+    p.add_argument("--reverse-truss", action="store_true", help="Enable upward trusses, with the frontend as the root")
     p.add_argument("--reverse-policy", choices=reverse_policy.POLICIES, help="Collector-discovered reverse routing policy (SDK default: ttl)")
     p.add_argument("--reverse-probability", type=float, help="Per-truss probability in [0,1]; requires --reverse-policy probability")
     p.add_argument("--rt-policy", choices=("1", "2"), default="1", help="Deprecated; use --reverse-policy")

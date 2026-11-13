@@ -24,7 +24,7 @@ experiments.
 | [`gen_node_pinning.py`](gen_node_pinning.py) | Generate a Social Network placement file |
 | [`pin_nodes.py`](pin_nodes.py) | Apply a placement file to a directory of manifests (`--dry-run` shows the changes) |
 | [`inject_perf_env.py`](inject_perf_env.py) | Add the Jaeger, Elasticsearch and collector settings that Kubernetes conversion drops |
-| [`checkpoint_distance.py`](checkpoint_distance.py), [`reverse_policy.py`](reverse_policy.py) | Validate and write the checkpoint distance and reverse-path options into the collector's configuration |
+| [`checkpoint_distance.py`](checkpoint_distance.py), [`reverse_policy.py`](reverse_policy.py) | Validate and write the checkpoint distance and upward-truss options into the collector's configuration |
 
 ## Experiments
 
@@ -39,6 +39,6 @@ experiments ran on, and some contain its paths.
 | [`grpc_interceptors/`](grpc_interceptors/README.md) | Comparison of the interceptor and wrapper instrumentation |
 | [`analysis/`](analysis) | Results and figures of past campaigns |
 
-The options for random checkpoint distances and reverse-path routing are described in
+The options for random checkpoint distances and upward-truss routing are described in
 [Randomized checkpoint distance](../docs/dev/randomized_checkpoint_distance.md) and
 [Reverse checkpoint probability](../docs/dev/reverse_checkpoint_probability.md).

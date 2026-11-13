@@ -63,9 +63,9 @@ REQUIRED
   -s <spec>            Wiring spec: docker_<kind>_es (Social Network), docker_<kind>_es_bd
                        (Social Network matching upstream DeathStarBench) or docker_<kind>_es_nw
                        (zero-work Social Network), where <kind> is one of
-                         pb    path bridge (PB)
-                         cgpb  call-graph path bridge (CGPB)
-                         sb    structural bridge (SB)
+                         pb    path bridge (P-Bridge)
+                         cgpb  call-graph bridge (CG-Bridge)
+                         sb    structural bridge (S-Bridge)
                          v     vanilla tracing, the baseline
                          nt    no tracing
                          rc    random checkpoints, a control (docker_rc_es only)

@@ -29,7 +29,7 @@ what you need to use them.
 
 ### Quick start
 
-Build the Social Network with the path bridge, deploy it, and load the social graph:
+Build the Social Network with the path bridge (P-Bridge), deploy it, and load the social graph:
 
 ```sh
 utils/build_deploy_dsb.sh -s docker_pb_es -n pb --cpd 2 --apply --seed
@@ -63,9 +63,9 @@ a mixed workload.
 
 | `<kind>` | Tracing |
 |---|---|
-| `pb` | Path bridge |
-| `cgpb` | Call-graph path bridge |
-| `sb` | Structural bridge |
+| `pb` | Path bridge (P-Bridge) |
+| `cgpb` | Call-graph bridge (CG-Bridge) |
+| `sb` | Structural bridge (S-Bridge) |
 | `v` | Vanilla OpenTelemetry, the baseline |
 | `nt` | No tracing |
 | `rc` | Random checkpoints, a control (`docker_rc_es` only) |
@@ -207,7 +207,7 @@ The specs follow the Social Network's naming: `docker_<kind>` (Jaeger with in-me
 | `--node-pinning <file>` | Placement file in the format above; requires `--frontend-deploy`. |
 | `--nodeport [port]` | Expose the frontend on a NodePort, chosen by Kubernetes unless given. |
 | `--skip-build` | Generate the manifests without building images; `--image-tag` names the existing images to use. |
-| `--reverse-truss` | Enable the response path, with the frontend as the root. |
+| `--reverse-truss` | Enable upward trusses, with the frontend as the root. |
 | `--sample-ratio <r>` | Head sampling ratio for traces. |
 
 Deployments go to their own namespace (`--namespace`, default `dsb-hotel`). To remove them:

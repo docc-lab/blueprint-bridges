@@ -23,7 +23,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// PathBridgeProcessor is the path bridge (PB). Each span carries the window from its nearest
+// PathBridgeProcessor is the path bridge (P-Bridge). Each span carries the window from its nearest
 // checkpoint ancestor: that checkpoint's span ID and a Bloom filter of the spans in between.
 // Checkpoints and leaves export it, which lets reconstruction place them even when the low-priority
 // spans between them are lost. Spans are exported in high- and low-priority batches, marked so the
