@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/blueprint-uservices/blueprint/blueprint/pkg/wiring"
@@ -24,13 +26,30 @@ import (
 	"github.com/blueprint-uservices/blueprint/plugins/workflow"
 )
 
-// Per-variant defaults. Adjust here if a variant needs its own collector
-// config or otelcontribcol image.
-const (
-	otelImage     = "10.10.1.1:30000/otelcontribcol:latest"
-	bridgesConfig = "/users/tomislav/opentelemetry-collector-contrib/test-config-bridges.yaml"
-	vanillaConfig = "/users/tomislav/opentelemetry-collector-contrib/config-vanilla.yaml"
+// The collector image and its configuration files. BLUEPRINT_REGISTRY is the registry that holds the
+// collector image (default: the in-cluster registry that utils/setup_environment.sh deploys);
+// BLUEPRINT_COLLECTOR_SRC is the collector checkout that provides the configuration files (default:
+// opentelemetry-collector-contrib next to this repository, where setup_environment.sh clones it).
+var (
+	otelImage     = registry() + "/otelcontribcol:latest"
+	bridgesConfig = filepath.Join(collectorSource(), "test-config-bridges.yaml")
+	vanillaConfig = filepath.Join(collectorSource(), "config-vanilla.yaml")
 )
+
+func registry() string {
+	if r := os.Getenv("BLUEPRINT_REGISTRY"); r != "" {
+		return r
+	}
+	return "10.10.1.1:30000"
+}
+
+func collectorSource() string {
+	if dir := os.Getenv("BLUEPRINT_COLLECTOR_SRC"); dir != "" {
+		return dir
+	}
+	_, source, _, _ := runtime.Caller(0) // <repository>/examples/dsb_sn/wiring/specs/docker.go
+	return filepath.Join(filepath.Dir(source), "..", "..", "..", "..", "..", "opentelemetry-collector-contrib")
+}
 
 // Spec-level Go runtime tuning baked into every Blueprint-built service
 // container for this example. Both the docker-compose `environment:` block

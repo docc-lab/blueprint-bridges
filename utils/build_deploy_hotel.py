@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Tomislav-RetCtx: Hotel generation/build/deploy with Social Network collector defaults."""
+"""Build, and optionally deploy, a DeathStarBench Hotel Reservation variant on Kubernetes.
+
+Locations can be overridden from the environment: BLUEPRINT_REGISTRY (image registry) and
+BLUEPRINT_COLLECTOR_SRC (collector checkout, for --build-collector)."""
 
 import argparse
 import json
@@ -20,8 +23,8 @@ REPO = Path(__file__).resolve().parents[1]
 APP = REPO / "examples/dsb_hotel"
 SERVICES = ("frontend", "search", "geo", "rate", "profile", "recomd", "user", "reserv")
 SPECS = [f"docker_{kind}{storage}" for kind in ("pb", "cgpb", "sb", "v")
-         for storage in ("", "_es")] + ["docker_rc_es", "docker_nt_es"]  # Tomislav-RetCtx: + no-tracing baseline
-# Tomislav-RetCtx: + zero-work variants (examples/dsb_hotel/workflow/hotelnw, wiring specs/docker_nw.go)
+         for storage in ("", "_es")] + ["docker_rc_es", "docker_nt_es"]  # + the no-tracing baseline
+# Zero-work variants (examples/dsb_hotel/workflow/hotelnw).
 SPECS += [f"docker_{kind}_es_nw" for kind in ("pb", "cgpb", "sb", "v", "nt")]
 
 
@@ -215,7 +218,7 @@ def parser():
     p.add_argument("-n", "--name", help="Build name; output defaults to examples/dsb_hotel/build_<name>")
     p.add_argument("--output", type=Path, help="Alternative output directory (must not exist)")
     p.add_argument("--extra", default="", help="Extra suffix on generated resources, e.g. rev2")
-    p.add_argument("--registry", default="10.10.1.1:30000")
+    p.add_argument("--registry", default=os.environ.get("BLUEPRINT_REGISTRY", "10.10.1.1:30000"))
     p.add_argument("--image-tag", default="latest", help="Registry tag; --skip-build must reference images already built")
     p.add_argument("--collector-image", help="Custom collector base image; defaults to <registry>/otelcontribcol:latest")
     p.add_argument("--collector-config", type=Path, help="Override the variant's collector YAML")
@@ -236,7 +239,8 @@ def parser():
     p.add_argument("--rt-depth", type=int, default=3, help="Deprecated; reverse distances use collector CPD settings")
     p.add_argument("--rt-leaf-reject", type=float, default=0, help="Probability of rejecting an unscheduled leaf checkpoint (0..1)")
     p.add_argument("--build-collector", action="store_true", help="Build and push the custom collector base image first")
-    p.add_argument("--collector-src", type=Path, default=REPO.parent / "opentelemetry-collector-contrib")
+    p.add_argument("--collector-src", type=Path,
+                   default=Path(os.environ.get("BLUEPRINT_COLLECTOR_SRC", REPO.parent / "opentelemetry-collector-contrib")))
     p.add_argument("--collector-toolchain", default="go1.24.13", help="Go toolchain for the collector's older dependencies")
     p.add_argument("--skip-build", action="store_true", help="Generate Compose and Kubernetes manifests without building/pushing images")
     p.add_argument("--frontend-deploy", action="store_true", help="Use one frontend Deployment instead of a DaemonSet")

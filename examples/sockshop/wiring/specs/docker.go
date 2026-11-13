@@ -1,6 +1,10 @@
 package specs
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
+
 	"github.com/blueprint-uservices/blueprint/blueprint/pkg/wiring"
 	"github.com/blueprint-uservices/blueprint/examples/sockshop/workflow/cart"
 	"github.com/blueprint-uservices/blueprint/examples/sockshop/workflow/catalogue"
@@ -52,8 +56,8 @@ func makeDockerSpec(spec wiring.WiringSpec) ([]string, error) {
 	trace_collector := otelcol.CollectorWithConfig(
 		spec, "otelcol",
 		jaeger_collector,
-		"/users/tomislav/opentelemetry-collector-contrib/test-config-bridges.yaml",
-		"10.10.1.1:30000/otelcontribcol:latest",
+		collectorConfig(),
+		collectorImage(),
 		8080, "jaeger")
 
 	// Modifiers that will be applied to all services
@@ -115,4 +119,25 @@ func makeDockerSpec(spec wiring.WiringSpec) ([]string, error) {
 	// Also include the tests and wlgen
 	return []string{"frontend_ctr", wlgen, "gotests", "otelcol", "jaeger"}, nil
 	// return []string{"frontend_ctr", wlgen, "gotests"}, nil
+}
+
+// collectorImage is the collector image in BLUEPRINT_REGISTRY (default: the in-cluster registry that
+// utils/setup_environment.sh deploys).
+func collectorImage() string {
+	registry := os.Getenv("BLUEPRINT_REGISTRY")
+	if registry == "" {
+		registry = "10.10.1.1:30000"
+	}
+	return registry + "/otelcontribcol:latest"
+}
+
+// collectorConfig is the bridges' collector configuration from the collector checkout:
+// BLUEPRINT_COLLECTOR_SRC, or opentelemetry-collector-contrib next to this repository.
+func collectorConfig() string {
+	dir := os.Getenv("BLUEPRINT_COLLECTOR_SRC")
+	if dir == "" {
+		_, source, _, _ := runtime.Caller(0) // <repository>/examples/sockshop/wiring/specs/docker.go
+		dir = filepath.Join(filepath.Dir(source), "..", "..", "..", "..", "..", "opentelemetry-collector-contrib")
+	}
+	return filepath.Join(dir, "test-config-bridges.yaml")
 }

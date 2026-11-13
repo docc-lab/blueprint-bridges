@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# setup_environment.sh — full one-time bootstrap for the Blueprint / DSB-SN
-# bridges workflow on a fresh CloudLab node.
+# setup_environment.sh — one-time bootstrap of the build and deploy toolchain on a cluster's head
+# node. Requirements and usage: docs/manual/cluster_setup.md.
 #
 # Installs EVERYTHING needed to build & deploy DSB-SN variants:
 #   1. Base apt packages (git, curl, python3-venv/pip)
-#   2. Clone the sibling repos next to blueprint-docc-mod:
-#        - docc-lab's opentelemetry-collector-contrib
+#   2. Clone the sibling repos next to this repository:
+#        - docc-lab's opentelemetry-collector-contrib (branch retctx-reject-impl)
 #        - DeathStarBench (--recurse-submodules)
 #   3. Build DeathStarBench's wrk2 load generator (apt: build-essential libssl-dev
 #        libz-dev luarocks; luarocks install luasocket; make; install to /usr/local/bin/wrk)
@@ -33,7 +33,8 @@ set -euo pipefail
 
 usage(){
 cat <<'EOHELP'
-setup_environment.sh — one-shot bootstrap of the DSB-SN bridges workflow on a fresh CloudLab head node
+setup_environment.sh — one-time bootstrap of the build and deploy toolchain on a cluster's head node
+(requirements and details: docs/manual/cluster_setup.md)
 
 USAGE
   utils/setup_environment.sh            # run all 8 stages (idempotent, safe to re-run)
@@ -42,13 +43,13 @@ USAGE
 STAGES (all idempotent)
   1/8  base apt packages       git curl ca-certificates python3-venv python3-pip
   2/8  clone sibling repos     opentelemetry-collector-contrib + DeathStarBench
-                               (--recurse-submodules), NEXT TO blueprint-docc-mod.
+                               (--recurse-submodules), next to this repository.
                                Skipped per-repo if already cloned — a restored copy
                                with local changes is never touched.
   3/8  build wrk2              DeathStarBench's load generator -> /usr/local/bin/wrk
   4/8  toolchain               Go (go.dev tarball, PATH into ~/.bashrc + ~/.profile),
                                protobuf compiler+lib, protoc-gen-go(-grpc), kompose
-  5/8  python venv             blueprint-docc-mod/.venv with pyyaml + aiohttp (seeder!)
+  5/8  python venv             .venv in this repository, with pyyaml + aiohttp (seeder)
   6/8  docker group            adds $USER to 'docker' (newgrp docker / re-login after)
   7/8  in-cluster registry     namespace+pvc+deployment+service at NodePort 30000
                                (skipped with a notice if kubectl is unreachable)
@@ -60,6 +61,7 @@ STAGES (all idempotent)
 ENVIRONMENT OVERRIDES
   CPU_GHZ=<ghz>         target clock for stage 8 (default 2.2 = c220g5 base clock)
   COLLECTOR_REPO=<url>  collector fork to clone (default docc-lab/opentelemetry-collector-contrib)
+  COLLECTOR_BRANCH=<b>  collector branch to clone (default retctx-reject-impl, the bridges' collector)
   DSB_REPO=<url>        DeathStarBench fork (default delimitrou/DeathStarBench)
 
 EXAMPLES
@@ -76,7 +78,7 @@ EXAMPLES
 AFTER IT FINISHES
   1. source ~/.bashrc              (pick up the Go PATH)
   2. newgrp docker                 (or re-login, for docker without sudo)
-  3. source blueprint-docc-mod/.venv/bin/activate   (pyyaml + aiohttp for the build/seed scripts)
+  3. source .venv/bin/activate     (from this repository: pyyaml + aiohttp for the build/seed scripts)
   4. re-run 'utils/pin-cpu-22ghz.sh pin <ghz> --all' after ANY node reboot (pin is not persistent)
 EOHELP
 exit "${1:-0}"
@@ -87,13 +89,14 @@ log(){  printf '\n\033[1;32m=== %s ===\033[0m\n' "$*"; }
 warn(){ printf '\033[1;33m[warn]\033[0m %s\n' "$*"; }
 
 # --- locations ------------------------------------------------------------
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # .../blueprint-docc-mod/utils
-BP_ROOT=$(dirname "$SCRIPT_DIR")                            # .../blueprint-docc-mod
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # <repository>/utils
+BP_ROOT=$(dirname "$SCRIPT_DIR")                            # <repository>
 BASE=$(dirname "$BP_ROOT")                                  # parent dir holding sibling repos
 VENV="$BP_ROOT/.venv"
 
 # Repo URLs (override via env to use forks).
 COLLECTOR_REPO=${COLLECTOR_REPO:-https://github.com/docc-lab/opentelemetry-collector-contrib.git}
+COLLECTOR_BRANCH=${COLLECTOR_BRANCH:-retctx-reject-impl}
 DSB_REPO=${DSB_REPO:-https://github.com/delimitrou/DeathStarBench.git}
 # Target CPU clock for the 2.2 GHz pin stage (override, e.g. CPU_GHZ=2.0 ./setup_environment.sh).
 CPU_GHZ=${CPU_GHZ:-2.2}
@@ -116,7 +119,7 @@ clone_if_absent(){   # <url> <dest> [extra git clone args...]
     git clone "$@" "$url" "$dest"
   fi
 }
-clone_if_absent "$COLLECTOR_REPO" "$BASE/opentelemetry-collector-contrib"
+clone_if_absent "$COLLECTOR_REPO" "$BASE/opentelemetry-collector-contrib" --branch "$COLLECTOR_BRANCH"
 clone_if_absent "$DSB_REPO"       "$BASE/DeathStarBench" --recurse-submodules
 # ensure submodules are present even if DSB was cloned earlier without them
 [ -d "$BASE/DeathStarBench/.git" ] && \

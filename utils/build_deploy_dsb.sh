@@ -31,18 +31,19 @@
 #   build_deploy_dsb.sh -s docker_v_es  -n v_esrev0  --build-collector --apply
 set -uo pipefail
 
-# Tomislav-RetCtx (2026-10-30): the repository this script lives in (the blueprint-perf worktree builds its own
-# examples; the hard-coded main checkout put generated code on a different branch than the images under test)
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DSB=$REPO/examples/dsb_sn
 UTILS=$REPO/utils
-REGISTRY=10.10.1.1:30000
-COLLECTOR_SRC=/users/tomislav/opentelemetry-collector-contrib
-SEED_DIR=/users/tomislav/DeathStarBench/socialNetwork
+# Locations, overridable from the environment (see --help). The wiring specs read the same variables.
+export BLUEPRINT_REGISTRY=${BLUEPRINT_REGISTRY:-10.10.1.1:30000}
+export BLUEPRINT_COLLECTOR_SRC=${BLUEPRINT_COLLECTOR_SRC:-$(dirname "$REPO")/opentelemetry-collector-contrib}
+REGISTRY=$BLUEPRINT_REGISTRY
+COLLECTOR_SRC=$BLUEPRINT_COLLECTOR_SRC
+SEED_HOST=${SEED_HOST:-${REGISTRY%%:*}}   # any node address reaches a NodePort; default: the registry host
+SEED_DIR=$DSB/scripts                     # the seeder reads datasets/ relative to its working directory
 SEED_PY=$DSB/scripts/init_social_graph.py
 
 SPEC=""; NAME=""; CPD=""; GC=""; EXTRA=""; COLLECTOR=""
-# Tomislav-RetCtx: optional collector-discovered CPD bounds; both are required.
 CPD_MIN=""; CPD_MAX=""
 REVERSE_POLICY=""; REVERSE_PROBABILITY=""
 BUILD_COLLECTOR=0; DO_APPLY=0; DO_SEED=0; DO_NOSEED=0; SKIP_BUILD=0; NOPIN_REQ=0; WRK_DAEMON=1; ANTI=0; ONEPER=0
@@ -59,14 +60,17 @@ USAGE
   build_deploy_dsb.sh -s <wiring_spec> -n <build_name> [options]
 
 REQUIRED
-  -s <spec>            Wiring spec = bridge kind. One of:
-                         docker_pb_es    Path Bridge (PB)
-                         docker_cgpb_es  Call-Graph Path Bridge (CGPB)
-                         docker_sb_es    Sequence Bridge (SB)
-                         docker_v_es     vanilla (true no-bridge baseline)
-                         docker_rc_es    random-checkpoint control
-                       Also selects the per-variant OT wrapper template at codegen
-                       time (exported as OT_BRIDGE) and the runtime BRIDGE_KIND.
+  -s <spec>            Wiring spec: docker_<kind>_es (Social Network), docker_<kind>_es_bd
+                       (Social Network matching upstream DeathStarBench) or docker_<kind>_es_nw
+                       (zero-work Social Network), where <kind> is one of
+                         pb    path bridge (PB)
+                         cgpb  call-graph path bridge (CGPB)
+                         sb    structural bridge (SB)
+                         v     vanilla tracing, the baseline
+                         nt    no tracing
+                         rc    random checkpoints, a control (docker_rc_es only)
+                       The kind becomes OT_BRIDGE for code generation and BRIDGE_KIND in every
+                       container. `go run examples/dsb_sn/wiring/main.go -h` lists every spec.
   -n <name>            Build dir name -> examples/dsb_sn/build_<name>/
 
 BUILD OPTIONS
@@ -85,8 +89,9 @@ BUILD OPTIONS
   --extra <str>        Append to the kompose suffix (e.g. --extra rev2 => v-esrev2).
                        Distinct suffix = distinct image names in the registry.
   --build-collector    Rebuild + push the otelcontribcol base image first.
-  --skip-build         Skip d2k8s image builds; reuse existing registry images
-                       (valid only if images for this exact suffix already exist).
+  --skip-build         Skip image builds and reuse images already in the registry. Set
+                       IMAGE_TAG to their tag (see the image: lines of an earlier build's
+                       manifests); otherwise the manifests name a new tag that does not exist.
 
 COLLECTOR PIPELINE
   --collector passthrough
@@ -117,12 +122,20 @@ PLACEMENT (stage [6]; generated only if node-pinning-<name>.yaml is absent)
 DEPLOY
   --apply              Evict whatever DSB-SN variant is live (auto-detected from
                        otelcol-<v>-ctr pods), apply this build, wait for Running.
-  --seed               After apply: NodePort-patch wrk2api + seed the social graph
-  --noseed             After apply: NodePort-patch wrk2api only (skip DB seed; for zero-work variants)
-                       (needs DeathStarBench/socialNetwork + venv with aiohttp).
+  --seed               After apply: expose wrk2api as a NodePort and seed the social graph
+                       (needs the Python venv, which provides aiohttp).
+  --noseed             After apply: expose wrk2api as a NodePort only (zero-work variants have
+                       no databases to seed).
 
 MISC
   -h, --help           This help.
+
+ENVIRONMENT
+  BLUEPRINT_REGISTRY       registry images are pushed to and pulled from (default 10.10.1.1:30000)
+  BLUEPRINT_COLLECTOR_SRC  collector checkout with the configuration files and build-and-push.sh
+                           (default: opentelemetry-collector-contrib next to this repository)
+  SEED_HOST                node address used to reach the wrk2api NodePort (default: the registry host)
+  IMAGE_TAG                tag of the application images (default: a new timestamp, v<date>-<time>)
 
 EXAMPLES
   # overhead-experiment fourway builds (passthrough, anti-affinity, no requests):
@@ -232,11 +245,10 @@ EXTRA_ARG=""; [ -n "$EXTRA" ] && EXTRA_ARG="-extra $EXTRA"
 # Select the OT client/server wrapper template per bridge kind (read by the
 # opentelemetry plugin's codegen). Derived from the spec: docker_<kind>_es -> <kind>.
 # vanilla => plain spans, no bridge data; pb/cgpb/sb => their bridge wrappers.
-OT_BRIDGE=$(echo "$SPEC" | sed -E 's/^docker_//; s/_nw$//; s/_es$//'); export OT_BRIDGE
+OT_BRIDGE=$(echo "$SPEC" | sed -E 's/^docker_//; s/_(nw|bd)$//; s/_es$//'); export OT_BRIDGE
 echo "   OT_BRIDGE=$OT_BRIDGE (per-variant OT wrapper template)"
 go run wiring/main.go -w "$SPEC" $EXTRA_ARG -o "build_$NAME" || die "wiring failed (watch for dead-import codegen errors in generated golang/)"
 [ -d "$BUILD/docker" ] || die "wiring produced no build_$NAME/docker"
-echo "   NOTE: confirm runtime/plugins/otelcol/trace.go / BRIDGE_KIND matches the intended bridge variant (compile-time selection site)."
 
 # 1b. resolve the AUTHORITATIVE kompose suffix from the generated compose --------
 #     (the real service suffix comes from the wiring spec/-extra, not the -o name;
@@ -418,8 +430,8 @@ done
 echo "   wrk2api NodePort: $NP"
 if [ "$DO_SEED" = 1 ]; then
   sleep 15
-  ( cd "$SEED_DIR" && python3 "$SEED_PY" --ip 10.10.1.1 --port "$NP" 2>&1 | tail -5 ) \
-    || die "seed failed (need: pip install aiohttp; CWD must be $SEED_DIR)"
+  ( cd "$SEED_DIR" && python3 "$SEED_PY" --ip "$SEED_HOST" --port "$NP" 2>&1 | tail -5 ) \
+    || die "seed failed (the venv must be active: it provides aiohttp)"
   echo "=== DONE: $VARIANT deployed + seeded. Drive load via wrk2api NodePort $NP, or per-node wrk2api daemonset pods. ==="
 else
   echo "=== DONE: $VARIANT deployed + NodePort ready (--noseed; DB init skipped). NodePort $NP ==="
