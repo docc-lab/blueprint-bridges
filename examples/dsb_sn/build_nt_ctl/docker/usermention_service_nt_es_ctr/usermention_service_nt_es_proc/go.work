@@ -1,8 +1,0 @@
-go 1.26.5
-
-use (
-	./runtime
-	./usermention_service_nt_es_proc
-	./workflow
-	
-)

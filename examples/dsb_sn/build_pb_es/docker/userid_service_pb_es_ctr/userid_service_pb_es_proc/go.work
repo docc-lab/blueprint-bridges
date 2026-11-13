@@ -1,8 +1,0 @@
-go 1.26.5
-
-use (
-	./runtime
-	./userid_service_pb_es_proc
-	./workflow
-	
-)

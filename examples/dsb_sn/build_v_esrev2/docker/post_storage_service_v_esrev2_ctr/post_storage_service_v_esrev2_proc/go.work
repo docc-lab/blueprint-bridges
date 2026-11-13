@@ -1,8 +1,0 @@
-go 1.26.4
-
-use (
-	./post_storage_service_v_esrev2_proc
-	./runtime
-	./workflow
-	
-)

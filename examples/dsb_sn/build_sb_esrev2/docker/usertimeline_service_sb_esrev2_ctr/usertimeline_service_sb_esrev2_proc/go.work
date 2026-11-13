@@ -1,8 +1,0 @@
-go 1.26.4
-
-use (
-	./runtime
-	./usertimeline_service_sb_esrev2_proc
-	./workflow
-	
-)

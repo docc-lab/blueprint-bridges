@@ -1,8 +1,0 @@
-go 1.26.3
-
-use (
-	./runtime
-	./uniqueid_service_sb_esrev1_proc
-	./workflow
-	
-)

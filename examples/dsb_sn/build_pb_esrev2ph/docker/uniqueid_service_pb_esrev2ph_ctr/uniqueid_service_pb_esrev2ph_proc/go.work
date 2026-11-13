@@ -1,8 +1,0 @@
-go 1.26.4
-
-use (
-	./runtime
-	./uniqueid_service_pb_esrev2ph_proc
-	./workflow
-	
-)

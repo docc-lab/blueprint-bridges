@@ -1,8 +1,0 @@
-go 1.25.6
-
-use (
-	./post_storage_service_sb3_proc
-	./runtime
-	./workflow
-	
-)

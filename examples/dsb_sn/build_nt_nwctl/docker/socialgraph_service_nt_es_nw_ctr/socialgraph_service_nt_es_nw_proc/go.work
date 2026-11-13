@@ -1,8 +1,0 @@
-go 1.26.5
-
-use (
-	./runtime
-	./socialgraph_service_nt_es_nw_proc
-	./workflow
-	
-)

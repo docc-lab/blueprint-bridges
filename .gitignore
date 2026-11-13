@@ -8,10 +8,8 @@
 
 *.venv
 
-# Tomislav-RetCtx: Blueprint regenerates these service trees from source on every
-# prepare (~12.7 GB across 80 of them); the pinned image digests in each campaign
-# root are the reproducible artifact, not the trees.
-examples/dsb_sn/build_*/
+# Generated build output: Blueprint regenerates these trees from the wiring specs.
+examples/**/build_*/
 examples/dsb_sn/node-pinning-*.yaml
 __pycache__/
 *.pyc

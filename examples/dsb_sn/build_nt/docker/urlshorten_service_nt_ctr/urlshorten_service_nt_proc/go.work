@@ -1,8 +1,0 @@
-go 1.25.2
-
-use (
-	./runtime
-	./urlshorten_service_nt_proc
-	./workflow
-	
-)

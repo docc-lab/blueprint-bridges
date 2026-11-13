@@ -1,8 +1,0 @@
-go 1.26.3
-
-use (
-	./runtime
-	./text_service_sb_esrev0_proc
-	./workflow
-	
-)

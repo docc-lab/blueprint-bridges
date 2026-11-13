@@ -1,8 +1,0 @@
-go 1.26.5
-
-use (
-	./post_storage_service_cgpb_es_nw_proc
-	./runtime
-	./workflow
-	
-)

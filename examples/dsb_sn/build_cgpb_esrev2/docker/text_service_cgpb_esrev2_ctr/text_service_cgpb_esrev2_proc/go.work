@@ -1,8 +1,0 @@
-go 1.26.4
-
-use (
-	./runtime
-	./text_service_cgpb_esrev2_proc
-	./workflow
-	
-)

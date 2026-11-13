@@ -1,8 +1,0 @@
-go 1.25.6
-
-use (
-	./runtime
-	./socialgraph_service_pb_proc
-	./workflow
-	
-)

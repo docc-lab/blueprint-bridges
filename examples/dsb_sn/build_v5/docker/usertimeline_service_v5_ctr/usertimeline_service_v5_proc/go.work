@@ -1,8 +1,0 @@
-go 1.25.6
-
-use (
-	./runtime
-	./usertimeline_service_v5_proc
-	./workflow
-	
-)
