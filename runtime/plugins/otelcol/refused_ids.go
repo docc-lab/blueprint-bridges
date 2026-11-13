@@ -1,30 +1,19 @@
-// Tomislav-RetCtx: census of the trace IDs whose spans the collector refused.
+// A count of the trace IDs whose spans the collector refused.
 //
-// Every SDK-side processor drops a batch when the agent collector answers with an error
-// (memory_limiter / priority processor refusal; OTLP_RETRY=off). At that moment the batch is
-// still in hand, so this records, per trace ID, whether a high-priority span (a checkpoint or a
-// promoted reverse-truss carrier) and/or any span of that trace was lost. The campaign runner
-// fetches the records over HTTP (:9464 by default) before and after each measured point and
-// takes the union across all services: the exact set of traces that lost a checkpoint (the
-// bridges' reconstruction-ineligible set) and the exact set that lost any span (vanilla's
-// incomplete set), with no trace sampling involved. Everything downstream of the agents is
-// verified loss-free from collector counters (send_failed, enqueue_failed), so this census is
-// complete. Records are append-only so a "from" offset gives the delta between two fetches.
+// A processor drops a batch when the collector agent refuses it (memory limiter or priority
+// processor). The batch is still in hand at that moment, so this records, per trace, whether a
+// high-priority span (a checkpoint) and whether any span of it was lost. Summed over all services
+// that gives exactly the traces that lost a checkpoint (which the bridges cannot reconstruct) and
+// the traces that lost any span (which vanilla cannot), with no trace sampling. Loss downstream of
+// the agents is checked separately, from collector counters.
 //
-// Tomislav-RetCtx (2026-09-24): memory is bounded. Unbounded per-trace state was a leak under
-// sustained overload -- every refused trace ID stayed in a global map and slice for the pod's
-// life (hotel no-work vanilla frontend: live heap 82 -> 931 MB over four back-to-back ramps
-// against GOMEMLIMIT 1GiB, GC-bound by the fifth). The per-trace dedup is now a two-generation
-// window (rotated every refusedDedupWindow or refusedDedupCap traces, whichever comes first; a
-// trace's spans are refused within milliseconds of each other, so counts are unchanged in
-// practice), and nothing else is retained: the per-ID records go to an append-only file only when
-// RETCTX_REFUSED_RECORDS_FILE is set (buffered, flushed every second; for offline unions), or to
-// memory only with RETCTX_REFUSED_RECORDS=on (tests / legacy fetch). The campaign reads the
-// counters, which stay cumulative and exact.
-//
-// Tomislav-RetCtx (user 2026-09-24): the per-trace census is OFF by default ("no census stuff during these
-// runs"): a refused batch then only adds its span counts (spans_all / spans_hp: one lock per batch, no map, no
-// log). RETCTX_REFUSED_CENSUS=on restores the per-trace dedup and the traces_* counters for loss experiments.
+// By default only span counts are kept (spans_all, spans_hp: one lock per batch).
+// RETCTX_REFUSED_CENSUS=on adds the per-trace counts (traces_*), deduplicated over a two-generation
+// window that rotates every refusedDedupWindow or refusedDedupCap traces; a trace's spans are
+// refused within milliseconds of each other, so the window does not change the counts. The
+// per-trace records themselves are kept only if asked for: appended to RETCTX_REFUSED_RECORDS_FILE,
+// or held in memory with RETCTX_REFUSED_RECORDS=on. The records are served over HTTP (:9464 by
+// default) and are append-only, so a "from" offset gives the records since an earlier fetch.
 package otelcol
 
 import (
@@ -43,9 +32,9 @@ import (
 )
 
 const (
-	refusedFlagHP     uint8 = 1  // a high-priority (checkpoint / carrier) span of this trace was refused
+	refusedFlagHP     uint8 = 1  // a high-priority span of this trace was refused
 	refusedFlagAny    uint8 = 2  // any span of this trace was refused
-	refusedRecordSize       = 17 // 16-byte trace ID + 1 flag byte
+	refusedRecordSize       = 17 // trace ID (16) + flags (1)
 )
 
 type refusedRecord struct {
@@ -63,12 +52,12 @@ const (
 // an append-only log of (trace ID, flags).
 type RefusedTraceIDs struct {
 	mu          sync.Mutex
-	census      bool               // per-trace dedup + traces_* counters (RETCTX_REFUSED_CENSUS=on)
+	census      bool               // per-trace counts (RETCTX_REFUSED_CENSUS=on)
 	cur, prev   map[[16]byte]uint8 // two-generation dedup window
 	rotated     time.Time
 	keepRecords bool
 	records     []refusedRecord
-	file        *bufio.Writer // RETCTX_REFUSED_RECORDS_FILE: records appended here instead of memory
+	file        *bufio.Writer // RETCTX_REFUSED_RECORDS_FILE: records go here instead of memory
 	tracesHP    int
 	tracesAny   int
 	spansHP     int64
@@ -93,7 +82,7 @@ var refusedIDs = func() *RefusedTraceIDs {
 			return r
 		}
 		r.file = bufio.NewWriterSize(f, 1<<16)
-		go func() { // periodic flush; the buffer bounds memory, the file holds the log
+		go func() { // flush periodically; the file holds the log
 			for range time.Tick(time.Second) {
 				r.mu.Lock()
 				_ = r.file.Flush()
@@ -112,8 +101,8 @@ func (r *RefusedTraceIDs) rotate(now time.Time) {
 	r.prev, r.cur, r.rotated = r.cur, make(map[[16]byte]uint8, len(r.cur)/2), now
 }
 
-// recordRefused notes every trace ID in a dropped batch. isHP says the batch carried
-// high-priority spans (for vanilla every span is trace-critical, so callers pass true).
+// recordRefused records every trace ID in a dropped batch. isHP says the batch held high-priority
+// spans (vanilla passes true: each of its spans is needed for its trace).
 func recordRefused(events []*tracepb.ResourceSpans, isHP bool) {
 	flag := refusedFlagAny
 	if isHP {
@@ -181,8 +170,7 @@ func recordRefused(events []*tracepb.ResourceSpans, isHP bool) {
 	}
 }
 
-// recordRefusedIDs is recordRefused for a batch the live processors export as bytes
-// (otlp_wire.go, wireBatch): the same counting over the batch's trace IDs.
+// recordRefusedIDs is recordRefused for an encoded batch (wireBatch).
 func recordRefusedIDs(ids []trace.TraceID, isHP bool) {
 	flag := refusedFlagAny
 	if isHP {
@@ -240,7 +228,7 @@ func (r *RefusedTraceIDs) snapshot(from int) (recs []refusedRecord, total int, s
 	if from > total {
 		from = total
 	}
-	recs = r.records[from:total] // append-only: the backing array keeps these elements valid
+	recs = r.records[from:total] // append-only, so these elements stay valid
 	summary = map[string]int64{
 		"records": int64(total), "traces_hp": int64(r.tracesHP), "traces_any": int64(r.tracesAny),
 		"spans_hp": r.spansHP, "spans_all": r.spansAll, "dedup_traces": int64(len(r.cur) + len(r.prev)),
@@ -276,7 +264,7 @@ func serveRefusedSummary(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(summary)
 }
 
-var _ = binary.LittleEndian // records are raw bytes; kept for readers that want an explicit order
+var _ = binary.LittleEndian // records are raw bytes in this order
 
 func init() {
 	port := os.Getenv("RETCTX_REFUSED_PORT")

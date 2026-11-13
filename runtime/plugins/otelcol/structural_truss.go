@@ -6,35 +6,30 @@ import (
 	"sort"
 )
 
-// Tomislav-RetCtx: S-Bridge truss = the CG-Bridge window core followed by the
-// S-Bridge's own vertical ordinals and orthogonal end-event trusses (paper §3.4,
-// Figure 4). Wire layout of one packed payload (before the optional forward
-// TTL byte that checkpointRange.wrap adds to propagation baggage):
+// SB payload layout. An SB truss is the CGPB window core followed by SB's own start ordinals and
+// end events. One packed payload (before the TTL byte that checkpointRange.wrap adds to propagated
+// baggage):
 //
 //	varint(absolute depth) || checkpoint(8) || byte(window distance - 1)
-//	|| bloom[geometry(distance)]                       # CG core: ancestors AMQ
-//	|| varint(len HA) || HA                            # CG core: fan-out witnesses
+//	|| bloom[geometry(distance)]                       # window core: the ancestors' filter
+//	|| varint(len HA) || HA                            # window core: fan-out entries
 //	|| varint(n) || n * ( varint(ordinal) || endGroup(bound = ordinal-1) )
 //	|| varint(m) || m * ( trace_id(16) || parent(8) || varint(k) || endGroup(bound = k) )
 //
-// The first four fields are byte-identical to the ranged PB/CGPB core, so
-// unpackCheckpointWindowBR reads an S-Bridge payload's depth, anchor, distance
-// and Bloom unchanged. The HA is length-prefixed here (CGPB leaves it as the
-// trailing remainder) so the orthogonal tail can follow it.
+// The first four fields match the PB/CGPB range-mode core byte for byte, so
+// unpackCheckpointWindowBR reads them unchanged. The HA is length-prefixed here (CGPB leaves it as
+// the remainder) so the tail can follow it.
 //
-// Ordinals: one start ordinal per span in the window, in path order, ending
-// with the span that carries the payload. Position i's endGroup is the list of
-// sibling start ordinals that had ENDED before span i started, as observed by
-// span i's parent: an orthogonal truss recorded vertically. Delayed entries
-// are end events a parent observed after its last child started (minus the
-// implied last one), stamped with the parent's trace and span ID and attached
-// to the next outgoing call from that service instance (paper Figure 6).
+// Ordinals: one start ordinal per span in the window, in path order, ending with the span that
+// carries the payload. Entry i's end group lists the siblings that had ended before span i
+// started, as its parent saw them. Delayed entries are end events a parent saw after its last
+// child started (minus the implied last one), stamped with the parent's trace and span ID and
+// attached to the next outgoing call of that process.
 //
-// endGroup: varint(count<<1 | lehmer). With lehmer=1 the group is a bitmap of
-// `bound` bits selecting which ordinals ended, followed by the permutation of
-// that set in end order as Lehmer digits packed into mixed-radix uvarint words.
-// With lehmer=0 it is count plain varints (used when the binary was built with
-// -tags sb_nolehmer, or when the ends are not a distinct subset of 1..bound).
+// endGroup: varint(count<<1 | lehmer). With lehmer=1 the group is a bitmap of `bound` bits marking
+// which ordinals ended, followed by their order as Lehmer digits packed into mixed-radix uvarint
+// words. With lehmer=0 it is count plain varints (builds with -tags sb_nolehmer, or ends that are
+// not a distinct subset of 1..bound).
 
 type structuralDelayed struct {
 	traceID  [16]byte
@@ -45,7 +40,7 @@ type structuralDelayed struct {
 
 type structuralTail struct {
 	ordinals  []int
-	endEvents [][]int // len == len(ordinals); endEvents[i] belongs to ordinals[i]
+	endEvents [][]int // endEvents[i] belongs to ordinals[i]
 	delayed   []structuralDelayed
 }
 
@@ -105,9 +100,9 @@ func mixedRadixChunks(n int) [][2]int {
 	return chunks
 }
 
-// mixedRadixChunkEnd returns where the chunk starting at digit position start ends: the same
-// boundaries as mixedRadixChunks, one at a time and without allocating, and the chunk's radix
-// product (every word of the chunk is below it).  Tomislav-RetCtx.
+// mixedRadixChunkEnd returns where the chunk starting at digit position start ends, and the chunk's
+// radix product (every word of the chunk is below it). The boundaries are those of
+// mixedRadixChunks, computed one at a time without allocating.
 func mixedRadixChunkEnd(n, start int) (end int, product uint64) {
 	product = 1
 	for i := start; i < n; i++ {
@@ -133,10 +128,9 @@ func packLehmer(out []byte, digits []int) []byte {
 	return out
 }
 
-// appendLehmerSmall packs the Lehmer code of perm, distinct values in 1..64, without allocating:
-// digit i (the rank of perm[i] among the values not yet placed) is the number of remaining values
-// below it, counted in a 64-bit set.  Same bytes as packLehmer(out, lehmerDigits(perm)).
-// Tomislav-RetCtx.
+// appendLehmerSmall packs the Lehmer code of perm (distinct values in 1..64) without allocating:
+// digit i, the rank of perm[i] among the values not yet placed, is counted in a 64-bit set. Same
+// bytes as packLehmer(out, lehmerDigits(perm)).
 func appendLehmerSmall(out []byte, perm []int) []byte {
 	var remaining uint64
 	for _, v := range perm {
@@ -182,7 +176,7 @@ func lehmerApplicable(ends []int, bound int) bool {
 	if bound <= 0 || len(ends) > bound {
 		return false
 	}
-	var small uint64 // allocation-free membership for the common bound <= 64
+	var small uint64 // membership set without allocation, for bound <= 64
 	var large []bool
 	if bound > 64 {
 		large = make([]bool, bound+1)
@@ -215,7 +209,7 @@ func packEndGroup(out []byte, ends []int, bound int) []byte {
 	}
 	if lehmerEnabled && lehmerApplicable(ends, bound) {
 		out = binary.AppendUvarint(out, uint64(len(ends))<<1|1)
-		// Tomislav-RetCtx: the bitmap is written in place (append of a make is not an allocation).
+		// The bitmap is written in place (appending a make([]byte) does not allocate).
 		at := len(out)
 		out = append(out, make([]byte, (bound+7)/8)...)
 		for _, e := range ends {
@@ -228,8 +222,8 @@ func packEndGroup(out []byte, ends []int, bound int) []byte {
 	}
 	out = binary.AppendUvarint(out, uint64(len(ends))<<1)
 	for _, e := range ends {
-		if e < 1 { // Tomislav-RetCtx: invariant (invariants.go): ordinals start at 1 (not always <= bound:
-			// a later sibling can end before an earlier one starts)
+		if e < 1 {
+			// Ordinals start at 1. They can exceed bound: a later sibling can end before an earlier one starts.
 			brokenInt("an end event is a child ordinal >= 1", "ordinal", e, 1)
 		}
 		out = binary.AppendUvarint(out, uint64(e))
@@ -248,8 +242,8 @@ func unpackEndGroup(buf []byte, bound int) (ends []int, rest []byte, ok bool) {
 		return nil, buf, header&1 == 0
 	}
 	if header&1 == 0 {
-		// Tomislav-RetCtx: every value takes at least one byte; a larger count is corrupt (it used to
-		// reach make() and panic: a malformed `_br` from the network could crash the service).
+		// Every value takes at least one byte, so a larger count is corrupt input from the network,
+		// not a reason to allocate.
 		if count > len(buf) {
 			return nil, nil, false
 		}
@@ -406,17 +400,16 @@ func unpackStructuralBR(raw []byte) (depth int, ckpt [8]byte, distance int, bloo
 	return int(d), ckpt, distance, bloomBytes, ha, tail, true
 }
 
-// Tomislav-RetCtx: a child's payload copies its parent's tail and adds one entry, so the inherited
-// part is copied as bytes instead of being decoded and encoded again on every span (it used to be:
-// unpackStructuralBR, then packStructuralBR twice per span, Lehmer codes included).  The scan below
-// validates exactly what unpackStructuralTail validates, without building anything.
+// A child's tail is its parent's tail plus one entry, so the inherited part is copied as bytes
+// instead of decoded and re-encoded on every span. The scan below validates exactly what
+// unpackStructuralTail validates, without building anything.
 
 // rawStructuralTail is a packed tail split into its two lists, as bytes.
 type rawStructuralTail struct {
-	n       uint64 // (ordinal, end group) entries ...
-	entries []byte // ... and their bytes
-	m       uint64 // delayed entries ...
-	delayed []byte // ... and their bytes
+	n       uint64 // (ordinal, end group) entries
+	entries []byte // their bytes
+	m       uint64 // delayed entries
+	delayed []byte // their bytes
 }
 
 // skipEndGroup returns what follows one end-event group, accepting exactly what unpackEndGroup
@@ -452,7 +445,7 @@ func skipEndGroup(buf []byte, bound int) (rest []byte, ok bool) {
 	set := 0
 	for i, b := range buf[:width] {
 		if i == width-1 && bound%8 != 0 {
-			b &= byte(1)<<uint(bound%8) - 1 // bits above bound are not read by unpackEndGroup
+			b &= byte(1)<<uint(bound%8) - 1 // unpackEndGroup ignores bits above bound
 		}
 		set += bits.OnesCount8(b)
 	}
@@ -550,10 +543,9 @@ func appendStructuralHeader(out []byte, depth int, ckpt [8]byte, distance int, b
 	return append(out, ha...)
 }
 
-// appendChildTail writes a child span's tail: its parent's entries unchanged, its own (ordinal, end
-// group), its parent's delayed entries unchanged, then the delayed entries drained for it.  The
-// same bytes as packStructuralTail of the decoded parent tail extended the same way
-// (TestChildTailMatchesRepack).
+// appendChildTail writes a child's tail: its parent's entries, its own (ordinal, end group), its
+// parent's delayed entries, then the delayed entries drained for it. The bytes equal repacking the
+// decoded parent tail (TestChildTailMatchesRepack).
 func appendChildTail(out []byte, parent rawStructuralTail, ordinal int, ends []int, drained []structuralDelayed) []byte {
 	out = binary.AppendUvarint(out, parent.n+1)
 	out = append(out, parent.entries...)
@@ -567,9 +559,9 @@ func appendChildTail(out []byte, parent rawStructuralTail, ordinal int, ends []i
 	return out
 }
 
-// structuralDelayedFromServer converts the server wrapper's end-of-request
-// summary (varint(children) || varint(count) || count*varint(ordinal)) into a
-// delayed truss stamped with the parent's identity.
+// structuralDelayedFromServer turns a server span's end-of-request summary
+// (varint(children) || varint(count) || count*varint(ordinal)) into a delayed truss stamped with
+// the parent's IDs.
 func structuralDelayedFromServer(traceID [16]byte, parent [8]byte, summary []byte) (structuralDelayed, bool) {
 	k, n := binary.Uvarint(summary)
 	if n <= 0 {

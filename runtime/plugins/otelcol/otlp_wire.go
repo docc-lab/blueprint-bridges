@@ -1,31 +1,22 @@
 package otelcol
 
-// Tomislav-RetCtx: the OTLP export bytes, written directly.
+// Direct OTLP encoding for the export path.
 //
-// Every live processor (vanilla, PB, CGPB, SB) used to build a *tracepb.Span object tree for each
-// ended span (buildSpanProto: about 64 allocations per request), hold it in its buffer, and hand
-// the batch to OpenTelemetry's otlptracegrpc exporter client, which marshalled the tree with
-// protobuf's reflective encoder and called the collector's Export method.  In the 2026-10-16
-// profiles that was 1.7% of all CPU for vanilla (utils/grpc_interceptors/README.md, "Where tracing
-// costs CPU").  This file replaces both steps inside the processor: encodeSpan writes a span's OTLP
-// bytes straight from the SDK's snapshot (one allocation per span), buildBatch concatenates them
-// into an ExportTraceServiceRequest, and otlpConn sends the bytes over a plain gRPC connection with a
-// codec that passes them through.  Nothing outside this package changes: the collector receives
-// standard OTLP/gRPC with the same "bridges-priority" metadata, and the OpenTelemetry SDK is still
-// the SDK.  The exporter client is only used by the earlier processors (eb, rc, priority,
-// realtime).
+// The processors do not build protobuf objects for spans or use the OTLP exporter client.
+// encodeSpan writes a span's OTLP bytes straight from the SDK's snapshot (one allocation per span),
+// buildBatch concatenates them into an ExportTraceServiceRequest, and otlpConn sends the bytes over
+// a plain gRPC connection with a codec that passes them through. The collector receives standard
+// OTLP/gRPC. (The older processors eb, rc, priority and realtime still use the exporter client.)
 //
-// The bytes are the ones proto.Marshal produced for the old object trees, field for field (the
-// tests in otlp_wire_test.go hold them to that, byte for byte), including two things the old code
-// did that a reader may not expect: an empty Status message is always present on a span (the old
-// code always set one), and the status code is copied from the SDK's codes.Code without mapping
-// (the SDK and OTLP number Ok and Error the other way round; see docs/tracing/BUG_REPORT.md).
+// The bytes are what proto.Marshal produced for the equivalent objects, field for field
+// (otlp_wire_test.go checks this). Two consequences worth knowing: every span has a Status message,
+// even an empty one, and the status code is the SDK's codes.Code value unmapped (the SDK and OTLP
+// number Ok and Error the other way round).
 //
-// Protobuf wire format, as used here: a field is a tag byte (field number << 3 | wire type) and a
-// value; wire type 0 is a varint, 1 a little-endian 64-bit value, 2 a length-prefixed byte string
-// (which is also how nested messages and strings are written).  Fields of a proto3 message are
-// omitted when they have their default value, except members of a oneof (AnyValue) and message
-// fields that are set, which are written even when empty.
+// Wire format used here: a field is a tag byte (field number << 3 | wire type) and a value; wire
+// type 0 is a varint, 1 a little-endian 64-bit value, 2 a length-prefixed byte string (also used
+// for strings and nested messages). proto3 omits fields at their default value, except oneof
+// members (AnyValue) and set message fields, which are written even when empty.
 
 import (
 	"context"
@@ -53,21 +44,19 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// ---------------------------------------------------------------------------------------------
-// The connection.
+// --- The connection ---
 
 // otlpExportMethod is the OTLP/gRPC trace export method (opentelemetry.proto.collector.trace.v1).
 const otlpExportMethod = "/opentelemetry.proto.collector.trace.v1.TraceService/Export"
 
 // otlpConn is a plain gRPC connection to the collector's OTLP endpoint, used with pre-encoded
-// request bytes.  It replaces the otlptracegrpc exporter client in the live processors.
+// requests.
 type otlpConn struct {
 	endpoint string
 	cc       *grpc.ClientConn
 }
 
-// dialOTLP opens the connection as the exporter client did (grpc.NewClient: the connection is made
-// lazily, on the first call; insecure, as every deployment here).
+// dialOTLP opens an insecure connection; grpc.NewClient connects lazily, on the first call.
 func dialOTLP(endpoint string) (*otlpConn, error) {
 	cc, err := grpc.NewClient(endpoint,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -78,16 +67,15 @@ func dialOTLP(endpoint string) (*otlpConn, error) {
 	return &otlpConn{endpoint: endpoint, cc: cc}, nil
 }
 
-// export sends one encoded ExportTraceServiceRequest.  ctx carries the deadline and the outgoing
-// metadata (the "bridges-priority" header); the error is the gRPC status, as before, so
-// categorizeSendError and the retry gate (sdk_retry.go) see what they saw.
+// export sends one encoded ExportTraceServiceRequest. ctx carries the deadline and the outgoing
+// metadata (bridges-priority). The error is the gRPC status.
 func (c *otlpConn) export(ctx context.Context, req []byte) error {
 	var resp []byte
 	if err := c.cc.Invoke(ctx, otlpExportMethod, req, &resp, grpc.ForceCodecV2(rawCodec{})); err != nil {
 		return err
 	}
-	// A partial success is a success with a note (the exporter client logged it through
-	// otel.Handle); the collector's priority processor refuses whole batches instead.
+	// A partial success counts as success; the collector's priority processor refuses whole
+	// batches.
 	if len(resp) > 0 {
 		var r coltracepb.ExportTraceServiceResponse
 		if proto.Unmarshal(resp, &r) == nil && r.PartialSuccess != nil {
@@ -101,15 +89,12 @@ func (c *otlpConn) export(ctx context.Context, req []byte) error {
 
 func (c *otlpConn) close() error { return c.cc.Close() }
 
-// rawCodec hands gRPC request bytes that are already encoded and gives back the response bytes as
-// they are.  Its name is "proto" so the content type stays application/grpc+proto.
+// rawCodec passes already-encoded request bytes to gRPC and returns the response bytes as they are.
+// It is named "proto" so the content type stays application/grpc+proto.
 //
-// Marshal copies the request into a buffer from gRPC's pool (what gRPC's own protobuf codec
-// marshals into), which gRPC frees once the bytes are written.  The copy (one memmove of the
-// batch) is what lets the batch keep its own buffer: it goes back to batchBufs as soon as the
-// export is over, retry included, with nothing in gRPC referencing it.  (gRPC's pool is a
-// sync.Pool, so under load it misses as often as it did for the old exporter: the same
-// allocation, see batchBufs.)
+// Marshal copies the request into a buffer from gRPC's pool, which gRPC frees once the bytes are
+// written. The copy lets the batch return its own buffer to batchBufs as soon as the export is
+// over, with nothing in gRPC still referencing it.
 type rawCodec struct{}
 
 func (rawCodec) Marshal(v any) (mem.BufferSlice, error) {
@@ -131,22 +116,19 @@ func (rawCodec) Unmarshal(data mem.BufferSlice, v any) error {
 
 func (rawCodec) Name() string { return "proto" }
 
-// ---------------------------------------------------------------------------------------------
-// The buffer entry and the batch.
+// --- The buffer entry and the batch ---
 
-// wireSpan is one ended span as the processors now buffer it: its OTLP Span message body, already
-// encoded, with what the flush needs to group and account for it.  48 bytes: the scope is the
-// process-wide interned entry (wireScopes), not the SDK's 64-byte Scope value, so the buffers
-// and their flush-time sort move half as much.
+// wireSpan is an ended span as the processors buffer it: its encoded Span message and what the flush
+// needs to group and account for it. scope points to the interned scope, which keeps the entry
+// small for the flush-time sort.
 type wireSpan struct {
 	body    []byte        // the Span message (without the ScopeSpans.spans tag and length)
 	scope   *wireScope    // groups spans into ScopeSpans at flush time (sortByScope)
 	traceID trace.TraceID // for the refused-trace census of a dropped batch
 }
 
-// wireBatch is one export: the request bytes and the spans in it (for the count and, if the batch
-// is refused, the census).  spans is a sub-slice of the flush's snapshot and the request buffer
-// comes from batchBufs, so a batch allocates nothing once the free list has filled.
+// wireBatch is one export: the request bytes and the spans in it. spans is a sub-slice of the flush's
+// snapshot, and the request buffer comes from batchBufs.
 type wireBatch struct {
 	req   []byte
 	n     int64
@@ -154,22 +136,18 @@ type wireBatch struct {
 	buf   *[]byte // the buffer from batchBufs that req was written into
 }
 
-// batchBufs holds the request buffers of batches, reused from flush to flush.  A batch keeps its
-// buffer until the processor calls release, after the batch was sent or dropped (after its one
-// retry, if it got one).  Writing the request into a fresh make([]byte) per batch cost 6-10 KB
-// of allocation per request in the 2026-10-20 profiles (utils/grpc_interceptors/README.md).
+// batchBufs is a free list of request buffers, reused from flush to flush. A batch keeps its buffer
+// until release, after it was sent or dropped (and retried, if it was).
 //
-// A free list, not a sync.Pool: the garbage collector empties a sync.Pool at every cycle, and a
-// loaded service collects many times between two flushes (100 ms apart), so a sync.Pool here
-// missed at every flush (the second profile of 2026-10-20).  The list keeps at most batchBufsKept
-// buffers of at most batchBufMax bytes each, so what it holds is bounded; a batch that needs more
-// grows its buffer, and release drops a buffer that grew past the cap.
+// It is a free list rather than a sync.Pool because the garbage collector empties a sync.Pool at
+// every cycle, and a loaded service collects many times between two flushes. It holds at most
+// batchBufsKept buffers of at most batchBufMax bytes; release drops buffers that grew larger.
 var batchBufs = make(chan *[]byte, batchBufsKept)
 
 const (
-	batchBufsKept = 32        // buffers kept: more than the batches one flush spawns
-	batchBufInit  = 32 << 10  // a new buffer's capacity (a 100 ms batch of a loaded service)
-	batchBufMax   = 256 << 10 // bigger buffers are not kept
+	batchBufsKept = 32        // more than one flush uses
+	batchBufInit  = 32 << 10  // about one 100 ms batch of a loaded service
+	batchBufMax   = 256 << 10 // larger buffers are not kept
 )
 
 func getBatchBuf() *[]byte {
@@ -189,14 +167,14 @@ func putBatchBuf(b *[]byte) {
 	*b = (*b)[:0]
 	select {
 	case batchBufs <- b:
-	default: // the list is full; the garbage collector takes this one
+	default: // list full: let the GC have it
 	}
 }
 
-// release returns the batch's buffer to the free list (its grown size with it).  Called exactly
-// once per batch; the request bytes must not be used afterwards.
+// release returns the batch's buffer to the free list. It is called exactly once per batch; req must
+// not be used afterwards.
 func (b *wireBatch) release() {
-	if b.buf == nil { // Tomislav-RetCtx: invariant (invariants.go): released exactly once
+	if b.buf == nil {
 		brokenRule("a batch is released once")
 	}
 	*b.buf = b.req[:0]
@@ -205,8 +183,7 @@ func (b *wireBatch) release() {
 	b.buf = nil
 }
 
-// traceIDs lists the batch's trace IDs for the census (recordRefusedIDs); only built when a batch
-// is refused.
+// traceIDs lists the batch's trace IDs, for recordRefusedIDs when the batch is refused.
 func (b *wireBatch) traceIDs() []trace.TraceID {
 	ids := make([]trace.TraceID, len(b.spans))
 	for i := range b.spans {
@@ -215,36 +192,33 @@ func (b *wireBatch) traceIDs() []trace.TraceID {
 	return ids
 }
 
-// wireScope is one InstrumentationScope as the flush needs it: the encoded ScopeSpans.scope field
-// and the scope's interning order, the key sortByScope groups by.  A process has a handful: the
-// server-side tracer of its service and one client-side tracer per service it calls (the
-// interceptors name the tracers as the wrappers did).
+// wireScope is an interned InstrumentationScope: its encoded ScopeSpans.scope field and its
+// interning order, which sortByScope groups by. A process has a handful: its server tracer and one
+// client tracer per service it calls.
 type wireScope struct {
-	name, version string // the identity, for the scopeFront scan
-	field         []byte // the ScopeSpans.scope field, tag and length included
-	order         int    // interning order (from 1); the sort key
+	name, version string // identity, compared by scopeFront lookups
+	field         []byte // ScopeSpans.scope field, tag and length included
+	order         int    // interning order, from 1
 }
 
 // scopeKey is the InstrumentationScope identity at the proto level.
 type scopeKey struct{ name, version string }
 
-// wireScopes interns the scopes, process-wide; the encoding is a pure function of the scope.
-// Lookups scan scopeFront, an immutable slice of the first scopes interned (a new one replaces the
-// slice under wireScopesMu): comparing two strings that are the same string (the tracer's) is a
-// pointer check, where hashing the key for the sync.Map cost a quarter of encodeSpan in the PB
-// profile of 2026-10-20 (0.33 s of 1.43 s).  A process with more scopes than scopeFrontMax finds
-// the rest in the map.
+// wireScopes interns scopes for the whole process. Lookups first scan scopeFront, an immutable slice
+// of the first scopes interned (replaced, not modified, under wireScopesMu): the tracer passes the
+// same strings every time, so comparing them is a pointer check, much cheaper than hashing a map
+// key. Scopes beyond scopeFrontMax are found in the map.
 var (
 	wireScopes   sync.Map   // scopeKey -> *wireScope
-	wireScopesMu sync.Mutex // serializes interning a new scope, so the orders are unique
-	wireScopeN   int        // scopes interned so far (under wireScopesMu)
+	wireScopesMu sync.Mutex // serializes interning, so orders are unique
+	wireScopeN   int        // scopes interned so far
 	scopeFront   atomic.Pointer[[]*wireScope]
 )
 
 const scopeFrontMax = 32
 
-// internScope returns the process-wide entry of a scope.  encodeSpan calls it for every span, so
-// the found case is a scan of scopeFront, a few pointer comparisons.
+// internScope returns the interned entry of a scope. It runs for every span; the common case is a
+// scan of scopeFront.
 func internScope(scope instrumentation.Scope) *wireScope {
 	if front := scopeFront.Load(); front != nil {
 		for _, ws := range *front {
@@ -271,18 +245,17 @@ func internScope(scope instrumentation.Scope) *wireScope {
 		front = *f
 	}
 	if len(front) < scopeFrontMax {
-		next := append(append([]*wireScope(nil), front...), ws) // a new slice: readers hold the old one
+		next := append(append([]*wireScope(nil), front...), ws) // a new slice: readers may hold the old one
 		scopeFront.Store(&next)
 	}
 	return ws
 }
 
-// scopeField is the encoded ScopeSpans.scope field of a scope (tests and benchmarks).
+// scopeField returns the encoded ScopeSpans.scope field of a scope (tests and benchmarks).
 func scopeField(scope instrumentation.Scope) []byte { return internScope(scope).field }
 
-// resourceField encodes the ResourceSpans.resource field for a TracerProvider's Resource, once per
-// processor (every span of a provider shares it): the attributes as the old convertResourceToProto
-// built them, marshalled once.
+// resourceField encodes the ResourceSpans.resource field of a TracerProvider's Resource. Every span
+// of a provider shares it, so each processor encodes it once.
 func resourceField(res *resource.Resource) []byte {
 	var attrs []*commonpb.KeyValue
 	if res != nil {
@@ -299,8 +272,7 @@ func resourceField(res *resource.Resource) []byte {
 	return appendBytesFieldAlways(nil, 1, body) // a set message is written even when empty
 }
 
-// anyValueProto is the object form of an attribute value (resource attributes only; spans use
-// appendAnyValue below).  Same mapping, incl. the fmt.Sprintf fallback.
+// anyValueProto converts an attribute value for the Resource; spans use appendAnyValue.
 func anyValueProto(v attribute.Value) *commonpb.AnyValue {
 	av := new(commonpb.AnyValue)
 	switch v.Type() {
@@ -342,14 +314,14 @@ func anyValueProto(v attribute.Value) *commonpb.AnyValue {
 	return av
 }
 
-// buildBatch encodes one ExportTraceServiceRequest: one ResourceSpans (the processor's resource)
-// holding one ScopeSpans (scope) holding the given spans, which must all be of that scope.
+// buildBatch encodes one ExportTraceServiceRequest: one ResourceSpans holding one ScopeSpans
+// holding the given spans, which must all have that scope.
 //
-//	request    := 0x0a len( resourceSpans )
+//	request       := 0x0a len( resourceSpans )
 //	resourceSpans := resourceField || 0x12 len( scopeSpans )
 //	scopeSpans    := scopeField || ( 0x12 len( span ) )*
 func buildBatch(resource, scope []byte, spans []wireSpan) *wireBatch {
-	if len(spans) == 0 { // Tomislav-RetCtx: invariant (invariants.go): batches emits non-empty runs only
+	if len(spans) == 0 {
 		brokenInt("a batch has spans", "spans", len(spans), 1)
 	}
 	ss := len(scope)
@@ -361,7 +333,7 @@ func buildBatch(resource, scope []byte, spans []wireSpan) *wireBatch {
 	buf := getBatchBuf()
 	req := (*buf)[:0]
 	if cap(req) < total {
-		req = make([]byte, 0, total) // the free-list entry grows to it at release
+		req = make([]byte, 0, total) // kept by the free list at release, if small enough
 	}
 	req = append(req, 0x0a)
 	req = binary.AppendUvarint(req, uint64(rs))
@@ -372,18 +344,15 @@ func buildBatch(resource, scope []byte, spans []wireSpan) *wireBatch {
 	for i := range spans {
 		req = appendBytesField(req, 2, spans[i].body)
 	}
-	if len(req) != total { // Tomislav-RetCtx: invariant: the lengths written up front are the bytes that follow
+	if len(req) != total {
 		brokenInt("an export request matches its computed size", "bytes", len(req), total)
 	}
 	return &wireBatch{req: req, n: int64(len(spans)), spans: spans, buf: buf}
 }
 
-// sortByScope groups a buffer snapshot in place: a stable sort by scope (interning order), after
-// which each scope's spans are one run, in their buffered order.  Nothing is copied or allocated.
-// The first version of this code copied the entries into per-scope slices (about 26 us and 4.5 KB
-// of allocation per request in the PB profiles of 2026-10-20), and a one-scope fast path did not
-// help: every process that calls other services has one client-side scope per callee.  A snapshot
-// that is already in scope order (a leaf service: one scope) is left as it is.
+// sortByScope groups a snapshot by scope in place, with a stable sort by interning order, so each
+// scope's spans form one run in their buffered order. A snapshot already in order (a leaf service
+// has one scope) is left as it is.
 func sortByScope(snap []wireSpan) {
 	for i := 1; i < len(snap); i++ {
 		if snap[i].scope.order < snap[i-1].scope.order {
@@ -393,12 +362,11 @@ func sortByScope(snap []wireSpan) {
 	}
 }
 
-// batches sorts a snapshot by scope and hands emit one batch per run of at most max spans of one
-// scope, each encoded by buildBatch under the processor's resource: one ResourceSpans wrapping one
-// ScopeSpans wrapping the run.  The batches keep sub-slices of the snapshot, which the caller must
-// not reuse.  Used by the flush of every processor.
+// batches sorts a snapshot by scope and calls emit once per run of at most max spans of one scope,
+// each encoded by buildBatch. The batches hold sub-slices of the snapshot, which the caller must not
+// reuse.
 func batches(resource []byte, snap []wireSpan, max int, emit func(*wireBatch)) {
-	if max < 1 { // Tomislav-RetCtx: invariant (invariants.go)
+	if max < 1 {
 		brokenInt("a batch holds at least one span", "max", max, 1)
 	}
 	sortByScope(snap)
@@ -414,29 +382,26 @@ func batches(resource []byte, snap []wireSpan, max int, emit func(*wireBatch)) {
 	}
 }
 
-// ---------------------------------------------------------------------------------------------
-// The span encoder.
+// --- The span encoder ---
 
-// attrPolicy is which attributes a processor exports and how: the strip lists and the breadcrumb
-// handling of the old per-processor convertAttributes, unchanged.
+// attrPolicy selects which attributes a processor exports and how its bridge data is written.
 type attrPolicy uint8
 
 const (
-	policyVanilla    attrPolicy = iota // vanilla: everything but the reverse-path keys
+	policyVanilla    attrPolicy = iota // everything but the response-path keys
 	policyPath                         // PB
 	policyCallGraph                    // CGPB
 	policyStructural                   // SB
 )
 
-// encodeSpan writes the OTLP Span message for s.  attrs is s.Attributes() (the caller already
-// holds it); w is the span's bridge wire entry (nil for vanilla); highPriority says whether the
-// span ended up a checkpoint, which decides which breadcrumbs it carries.
+// encodeSpan writes the OTLP Span message for s. attrs is s.Attributes(); w is the span's wire entry
+// (nil for vanilla); highPriority says whether the span is a checkpoint, which decides which bridge
+// data it exports.
 func encodeSpan(s sdktrace.ReadOnlySpan, attrs []attribute.KeyValue, w *bridgeWire, highPriority bool, policy attrPolicy) wireSpan {
 	sc := s.SpanContext()
 	tid, sid := sc.TraceID(), sc.SpanID()
-	// Tomislav-RetCtx: invariants (invariants.go): an ended span has valid IDs; a checkpoint with wire
-	// state has a payload (OnStart wrote one for every span), and the reverse context it took over is
-	// the packed envelope (reverse_checkpoint.go keeps it raw beside the span).
+	// An ended span has valid IDs; a checkpoint with wire state has a payload, and a reverse context
+	// it took over is the packed envelope.
 	if !sc.IsValid() {
 		brokenRule("an exported span has a valid span context")
 	}
@@ -464,8 +429,7 @@ func encodeSpan(s sdktrace.ReadOnlySpan, attrs []attribute.KeyValue, w *bridgeWi
 	buf = appendFixed64Field(buf, 7, uint64(s.StartTime().UnixNano()))
 	buf = appendFixed64Field(buf, 8, uint64(s.EndTime().UnixNano()))
 	buf = appendAttributes(buf, 9, attrs, policy, true)
-	// Tomislav-RetCtx (user 2026-10-29): a span's bridge data is ONE attribute (appendBridgeWireBytes),
-	// from its wire entry, or from the legacy attribute-carried breadcrumbs of the fixed-cpd mode.
+	// A span's bridge data is one attribute (appendBridgeWireBytes).
 	if w != nil {
 		var scratch [2 * binary.MaxVarintLen64]byte
 		buf = appendBridgeWireBytes(buf, w.bridgeBytes(&scratch), highPriority)
@@ -487,11 +451,11 @@ func encodeSpan(s sdktrace.ReadOnlySpan, attrs []attribute.KeyValue, w *bridgeWi
 		buf = appendAttributes(buf, 4, link.Attributes, policy, false)
 		buf = closeMessage(buf, 13, mark)
 	}
-	// Status is always present (the old code always built one), even when empty.
+	// Status is always written, even when empty.
 	mark := len(buf)
 	st := s.Status()
 	buf = appendStringField(buf, 2, st.Description)
-	buf = appendVarintField(buf, 3, uint64(st.Code)) // unmapped, as before (see the file comment)
+	buf = appendVarintField(buf, 3, uint64(st.Code)) // unmapped; see the comment at the top
 	buf = closeMessage(buf, 15, mark)
 	return wireSpan{body: buf, scope: internScope(s.InstrumentationScope()), traceID: tid}
 }
@@ -513,18 +477,16 @@ func spanKindCode(kind trace.SpanKind) int {
 	}
 }
 
-// appendAttributes writes the attributes the policy lets through as repeated KeyValue messages of
-// the given field.  The strip lists are those of the old per-processor convertAttributes functions:
+// appendAttributes writes the attributes the policy lets through as repeated KeyValue messages of the
+// given field. Skipped:
 //
-//	vanilla:  skip the reverse-path keys (backend.IsReverseBaggageKey, __bag.__rt_depth)
-//	PB:       skip __bag.*, depth, hasChildren, the ancestry keys
-//	CGPB:     as PB, also skipping childCount
-//	SB:       skip __bag.*, depth, hasChildren, childCount, eventCount, remEndEvents, `_oc`, `d`
+//	vanilla:  the response-path keys (backend.IsReverseBaggageKey, __bag.__rt_depth)
+//	PB:       __bag.*, depth, hasChildren, the ancestry keys
+//	CGPB:     as PB, plus childCount
+//	SB:       __bag.*, depth, hasChildren, childCount, eventCount, remEndEvents, `_oc`, `d`
 //
-// span says whether these are the span's own attributes: a bridge span's breadcrumbs (`_br`, `_d`,
-// `_o`, legacy base64 strings) and its reverse context (`_rc`) are then left to
-// appendBridgeWireBytes, which writes them as one attribute; on events and links (never bridge
-// data in practice) the keys are ordinary attributes.
+// span says whether these are the span's own attributes. If so, the bridge keys (`_br`, `_d`, `_o`
+// and `_rc`) are left to appendBridgeWireBytes; on events and links they are ordinary attributes.
 func appendAttributes(buf []byte, field int, attrs []attribute.KeyValue, policy attrPolicy, span bool) []byte {
 	for _, attr := range attrs {
 		key := string(attr.Key)
@@ -570,18 +532,18 @@ func appendAttributes(buf []byte, field int, attrs []attribute.KeyValue, policy 
 	return buf
 }
 
-// bridgeBytes is the material of a span's bridge attribute: from its wire entry (bridgeWire) for
-// a bridge span with wire state, or from the legacy attribute-carried breadcrumbs of the fixed-cpd
-// mode (legacyBridgeBytes).  A nil depth or ordinal means the span has none.
+// bridgeBytes is what a span's bridge attribute is made of: from its wire entry, or from the
+// attributes the legacy fixed-distance mode uses (legacyBridgeBytes). A nil depth or ordinal means
+// the span has none.
 type bridgeBytes struct {
-	rc         string // the reverse context the span took over: the raw packed envelope (or legacy text); "" = none
-	emit       []byte // the checkpoint's `_br` payload
+	rc         string // reverse context the span took over, raw (or legacy text); "" if none
+	emit       []byte // the checkpoint payload
 	depth      []byte // uvarint(absolute depth)
 	ordinal    []byte // uvarint(child ordinal), SB only
 	structural bool
 }
 
-// bridgeBytes views the wire entry; the varints are written into scratch, which the caller owns.
+// bridgeBytes reads the wire entry; the varints are written into scratch, which the caller owns.
 func (w *bridgeWire) bridgeBytes(scratch *[2 * binary.MaxVarintLen64]byte) bridgeBytes {
 	n := binary.PutUvarint(scratch[:], uint64(w.depth))
 	b := bridgeBytes{rc: w.rev.rc, emit: w.emit, depth: scratch[:n], structural: w.structural}
@@ -592,10 +554,9 @@ func (w *bridgeWire) bridgeBytes(scratch *[2 * binary.MaxVarintLen64]byte) bridg
 	return b
 }
 
-// legacyBridgeBytes collects the attribute-carried breadcrumbs of a bridge span without wire state
-// (the fixed-cpd mode, pb_processor.onStartFixed and its CGPB / SB counterparts): `_br`, `_d` and
-// `_o` are base64 strings (pack.go encodeBR; malformed base64 gives empty bytes, as before), `_rc`
-// the exported text of the reverse context (backend.RetCtxText), taken back to its raw form.
+// legacyBridgeBytes collects the bridge data of a span without wire state (fixed-distance mode):
+// `_br`, `_d` and `_o` are base64 strings (malformed ones give empty bytes) and `_rc` is the text
+// form of the reverse context, converted back to raw.
 func legacyBridgeBytes(attrs []attribute.KeyValue, policy attrPolicy) bridgeBytes {
 	b := bridgeBytes{structural: policy == policyStructural}
 	for _, attr := range attrs {
@@ -620,21 +581,17 @@ func legacyBytes(b64 string) []byte {
 	return []byte{}
 }
 
-// appendBridgeWireBytes writes the span's bridge data as ONE attribute (Tomislav-RetCtx, user
-// 2026-10-29: never several key/value pairs for one set of bridge data; before, a checkpoint that
-// took over a reverse context carried `_rc` beside `_br`, and an ordinary SB span `_o` beside `_d`):
+// appendBridgeWireBytes writes a span's bridge data as one attribute:
 //
-//	checkpoint:          `_br` = uvarint(len(rc)) || rc || payload   (no reverse context: one 0x00, then the payload)
+//	checkpoint:          `_br` = uvarint(len(rc)) || rc || payload   (no reverse context: 0x00 || payload)
 //	ordinary PB / CGPB:  `_d`  = uvarint(depth)
 //	ordinary SB:         `_o`  = uvarint(ordinal) || uvarint(depth)
 //
-// rc is the packed reverse envelope raw (backend/reversetruss_packed.go), no longer its base64 text:
-// `_br` is a bytes value, so nothing needed the text.  splitBR reads a `_br` back; the Python side
-// is utils/retctx_wire.py.  A reverse context never occurs on an ordinary span (pathCheckpoint makes
-// such a span a checkpoint); should one, it is dropped here rather than exported on its own.
+// rc is the packed reverse envelope (backend/reversetruss_packed.go). splitBR reads `_br` back; the
+// Python reader is utils/retctx_wire.py.
 func appendBridgeWireBytes(buf []byte, b bridgeBytes, highPriority bool) []byte {
-	if !highPriority && b.rc != "" { // Tomislav-RetCtx: invariant: pathCheckpoint / structuralCheckpoint
-		// make every span with a reverse context a checkpoint (it used to be dropped here silently)
+	if !highPriority && b.rc != "" {
+		// pathCheckpoint and structuralCheckpoint make every span with a reverse context a checkpoint.
 		brokenRule("only a checkpoint carries a reverse context")
 	}
 	if highPriority {
@@ -652,8 +609,8 @@ func appendBridgeWireBytes(buf []byte, b bridgeBytes, highPriority bool) []byte 
 	return appendKeyBytes(buf, 9, AttrD, b.depth)
 }
 
-// appendKeyBR writes the checkpoint attribute: key `_br`, bytes_value = uvarint(len(rc)) || rc || emit,
-// straight into buf (no intermediate copy of the payload).
+// appendKeyBR writes the checkpoint attribute `_br` = uvarint(len(rc)) || rc || emit directly into
+// buf.
 func appendKeyBR(buf []byte, field int, rc string, emit []byte) []byte {
 	mark := len(buf)
 	buf = appendStringField(buf, 1, AttrBREmit)
@@ -665,7 +622,7 @@ func appendKeyBR(buf []byte, field int, rc string, emit []byte) []byte {
 	buf = binary.AppendUvarint(buf, uint64(len(rc)))
 	buf = append(buf, rc...)
 	buf = append(buf, emit...)
-	if len(buf)-value != want { // Tomislav-RetCtx: invariant: the length prefix is the value written
+	if len(buf)-value != want {
 		brokenInt("the `_br` bytes value matches its length prefix", "written", len(buf)-value, want)
 	}
 	buf = closeMessage(buf, 2, inner)
@@ -685,8 +642,8 @@ func appendKeyBytes2(buf []byte, field int, key string, a, b []byte) []byte {
 	return closeMessage(buf, field, mark)
 }
 
-// splitBR reads a `_br` value back: the reverse context (nil when the checkpoint took none over)
-// and the payload.  ok is false when the length prefix overruns the value.
+// splitBR splits a `_br` value into the reverse context (nil if none) and the payload. ok is false
+// if the length prefix overruns the value.
 func splitBR(raw []byte) (rc, emit []byte, ok bool) {
 	n, k := binary.Uvarint(raw)
 	if k <= 0 || n > uint64(len(raw)-k) {
@@ -698,8 +655,7 @@ func splitBR(raw []byte) (rc, emit []byte, ok bool) {
 	return rc, raw[k+int(n):], true
 }
 
-// appendKeyBytes writes one KeyValue whose value is the bytes_value raw (written even when empty:
-// the oneof member is set).
+// appendKeyBytes writes one KeyValue with a bytes_value, even an empty one (a set oneof member).
 func appendKeyBytes(buf []byte, field int, key string, raw []byte) []byte {
 	mark := len(buf)
 	buf = appendStringField(buf, 1, key)
@@ -719,8 +675,8 @@ func appendKeyString(buf []byte, field int, key, s string) []byte {
 	return closeMessage(buf, field, mark)
 }
 
-// appendAnyValue writes an AnyValue message as the given field.  A oneof member is written even
-// when it is the zero value.
+// appendAnyValue writes an AnyValue message as the given field. A oneof member is written even at
+// its zero value.
 func appendAnyValue(buf []byte, field int, v attribute.Value) []byte {
 	mark := len(buf)
 	switch v.Type() {
@@ -778,8 +734,7 @@ func appendAnyValue(buf []byte, field int, v attribute.Value) []byte {
 	return closeMessage(buf, field, mark)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Protobuf primitives.  Fields are numbered below 16, so every tag is one byte.
+// --- Protobuf primitives. Field numbers are below 16, so every tag is one byte. ---
 
 func uvarintLen(v uint64) int {
 	n := 1
@@ -790,11 +745,10 @@ func uvarintLen(v uint64) int {
 	return n
 }
 
-// closeMessage turns the bytes written since mark into a length-prefixed message field: the tag
-// and the length are inserted in front of the body by moving the body right (one copy of a small
-// body, instead of encoding into a scratch buffer and copying it over).
+// closeMessage turns what was written since mark into a length-prefixed message field, moving the
+// body right to make room for the tag and length.
 func closeMessage(buf []byte, field int, mark int) []byte {
-	if field < 1 || field > 15 { // Tomislav-RetCtx: invariant: the tag below is one byte (field<<3 | 2)
+	if field < 1 || field > 15 {
 		brokenInt("a closed message's field number is 1..15", "field", field, 15)
 	}
 	n := len(buf) - mark

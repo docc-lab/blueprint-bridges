@@ -1,23 +1,15 @@
 package otelcol
 
-// Tomislav-RetCtx: one-shot SDK-side retry of refused export batches.
+// Optional one-shot retry of refused export batches, chosen by BRIDGES_RETRY:
 //
-// BRIDGES_RETRY selects the policy (default "off" = every campaign so far: a refused batch is
-// dropped at once and recorded in the refused-trace census):
+//	off  (default) a refused batch is dropped and counted (refused_ids.go).
+//	hp   bridges: a refused high-priority batch is retried once, after BRIDGES_RETRY_DELAY_MS plus
+//	     up to 50 % jitter. While one waits, low-priority batches are dropped locally instead of
+//	     sent: the collector would refuse them anyway.
+//	all  vanilla's equivalent: every refused batch is retried once; nothing is suppressed.
 //
-//	off  no retry.
-//	hp   bridges: a refused HIGH-PRIORITY (checkpoint) batch is retried exactly ONCE after
-//	     BRIDGES_RETRY_DELAY_MS (+ up to 50 % jitter). While any HP batch awaits its retry,
-//	     LOW-PRIORITY batches are not sent at all: they are dropped locally and recorded as
-//	     refused (the collector is refusing anyway; this spares it the receive/decode and the
-//	     application the marshal/send).
-//	all  vanilla's matching budget: every refused batch is retried exactly once; nothing is
-//	     suppressed.
-//
-// Memory is bounded by construction: a batch is held only between its refusal and its single
-// retry, so the pending set is at most (refusal rate x delay). The pending depth and its
-// high-water marks (spans and protobuf bytes, since the last metrics line and since start) are
-// logged on every *_processor_metrics line so the application-side cost is measured, not argued.
+// A batch is held only between its refusal and its retry, so memory is bounded by refusal rate
+// times delay. The pending depth and its high-water marks are logged with the processor metrics.
 
 import (
 	"log/slog"
@@ -52,10 +44,10 @@ type retryGate struct {
 	winMaxSpans atomic.Int64 // high-water since the last metrics line
 	winMaxBytes atomic.Int64
 
-	retriedSpans   atomic.Int64 // spans whose batch got its one retry
-	retryOKSpans   atomic.Int64 // ... and was accepted on it
-	retryFailSpans atomic.Int64 // ... and was refused again (then dropped + recorded)
-	lpSuppressed   atomic.Int64 // LP spans dropped locally while HP awaited a retry
+	retriedSpans   atomic.Int64 // spans whose batch was retried
+	retryOKSpans   atomic.Int64 // ... accepted on the retry
+	retryFailSpans atomic.Int64 // ... refused again, then dropped
+	lpSuppressed   atomic.Int64 // low-priority spans dropped while a retry waited
 }
 
 func newRetryGate(mode string, delayMS string) *retryGate {
@@ -74,11 +66,11 @@ func newRetryGate(mode string, delayMS string) *retryGate {
 // errLPSuppressed marks an LP batch dropped locally while an HP batch awaited its retry.
 var errLPSuppressed = status.Error(codes.ResourceExhausted, "sdk: LP batch suppressed while an HP batch awaits its retry")
 
-// sdkRetry is per process: one bridge processor per service.
+// sdkRetry is process-wide; there is one span processor per service.
 var sdkRetry = newRetryGate(os.Getenv("BRIDGES_RETRY"), os.Getenv("BRIDGES_RETRY_DELAY_MS"))
 
-// retryable: the collector's refusals (memory_limiter / priority processor: Unavailable; LP
-// shedding may use ResourceExhausted) and an export that timed out under load.
+// retryable reports whether an error is worth a retry: a collector refusal (Unavailable, or
+// ResourceExhausted from low-priority shedding) or an export that timed out under load.
 func retryable(err error) bool {
 	switch status.Code(err) {
 	case codes.Unavailable, codes.ResourceExhausted, codes.DeadlineExceeded:
@@ -112,8 +104,8 @@ func bumpMax(v *atomic.Int64, x int64) {
 	}
 }
 
-// schedule holds one refused batch and retries it once after delay (+jitter). resend performs
-// the send; done receives its result (nil = accepted). Exactly one call to done per schedule.
+// schedule holds a refused batch and retries it once after the delay. resend sends it; done is
+// called exactly once with the result (nil if accepted).
 func (g *retryGate) schedule(events []*tracepb.ResourceSpans, n int64, resend func() error, done func(error)) {
 	var size int64
 	for _, rs := range events {
@@ -122,7 +114,7 @@ func (g *retryGate) schedule(events []*tracepb.ResourceSpans, n int64, resend fu
 	g.scheduleBytes(size, n, resend, done)
 }
 
-// scheduleBytes is schedule for a batch already encoded (otlp_wire.go): size is its length.
+// scheduleBytes is schedule for an encoded batch of size bytes.
 func (g *retryGate) scheduleBytes(size, n int64, resend func() error, done func(error)) {
 	g.pendingBatches.Add(1)
 	spans := g.pendingSpans.Add(n)
@@ -148,8 +140,8 @@ func (g *retryGate) scheduleBytes(size, n int64, resend func() error, done func(
 	}()
 }
 
-// logMetrics emits the retry gauges as one BRIDGES_RETRY_metrics line (the runner's log parser
-// keys on BRIDGES_RETRY); a no-op when the policy is off so existing logs are unchanged.
+// logMetrics logs the retry gauges on a BRIDGES_RETRY_metrics line. It logs nothing when the policy
+// is off.
 func (g *retryGate) logMetrics() {
 	if g.mode == retryOff {
 		return

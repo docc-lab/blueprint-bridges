@@ -15,46 +15,33 @@ import (
 
 const reverseDepthBaggageKey = "__rt_depth"
 
-// Tomislav-RetCtx: reverseDepthAttribute is no longer WRITTEN -- depth, the
-// scheduling decision, the prepared flag and the outgoing carrier now live in
-// reverseSpanState beside the processor instead of on the span. The key is kept
-// because the export path still strips it defensively and a test asserts it never
-// reaches a span. rev_prepared and rev_scheduled are gone entirely.
+// reverseDepthAttribute is no longer written; the export path still strips it, and a test checks it
+// never reaches a span.
 const reverseDepthAttribute = "__bag." + reverseDepthBaggageKey
 
-// Still a span attribute: the export classifier reads it at OnEnd, after the
-// per-span state has been released.
+// checkpointRejectedAttribute is read by the export classifier at OnEnd, after the per-span state
+// is gone.
 const checkpointRejectedAttribute = "__bag.rev_rejected"
 
-// Tomislav-RetCtx: reverseCheckpointProcessor finalizes leaf rejection and
-// independent reverse TTLs/probability trials, preserving each truss's origin.
-// All spans still reach the normal processor and export buffer. Checkpoint
-// rejection changes the exported span's checkpoint role, not its admission.
-// Tomislav-RetCtx: per-span state the reverse path needs between OnStart and
-// PrepareCheckpoint. It used to ride on the span as `__bag.`-prefixed attributes
-// that were stripped at export -- values written only so they could be read back
-// one stack frame later. That was expensive twice over: every read locked the span
-// and ran a full dedupe pass with a fresh map, and every write lengthened the
-// attribute slice that the export path's snapshot() then has to dedupe for EVERY
-// span. Keeping them here mirrors what the forward path already does for
-// per-request state (ir_ot_server.go stashes childCount, childrenTracker and the
-// rest as context-carried pointers and touches the span exactly once, at the end).
-//
-// Keyed by SpanID and removed at OnEnd, so a span that never ends is the only way
-// to retain an entry; in this workload every span ends.
+// reverseSpanState is what the response path needs to know about a span between OnStart and
+// PrepareCheckpoint. Keeping it in a table rather than in span attributes avoids a locked dedupe of
+// the attribute set on every read, and keeps the exported attribute set short. Entries are removed
+// at OnEnd.
 type reverseSpanState struct {
 	depth     uint64
 	scheduled bool
 	prepared  bool
 	carried   string
-	// Tomislav-RetCtx: the decisions PrepareCheckpoint makes for a bridge span with wire state,
-	// read at OnEnd by classification (pathCheckpoint) and export (appendBridgeWireBytes) instead
-	// of being written to the span as attributes (`_rc`, `__bag.rev_rejected`).  Spans without wire
-	// state (vanilla, the legacy fixed-cpd mode) still use the attributes.
-	rc       string // the trusses this span took over, raw (packed envelope); exported inside `_br`
-	rejected bool   // a leaf that rejected being a checkpoint
+	// What PrepareCheckpoint decided for a span with wire state, read at OnEnd by classification and
+	// export. Spans without wire state (vanilla, fixed-distance mode) use attributes instead.
+	rc       string // trusses this span took over (packed envelope), exported inside `_br`
+	rejected bool   // a leaf that declined to be a checkpoint
 }
 
+// reverseCheckpointProcessor wraps a span processor with the response path: spans can absorb the
+// trusses their children return (becoming checkpoints), pass them on upstream, or, as unscheduled
+// leaves, decline to be checkpoints. Every span still reaches the wrapped processor; the response
+// path only changes a span's checkpoint role.
 type reverseCheckpointProcessor struct {
 	sdktrace.SpanProcessor
 	states         *reverseStateTable
@@ -94,8 +81,7 @@ func wrapReverseCheckpointProcessor(next sdktrace.SpanProcessor) sdktrace.SpanPr
 		return next
 	}
 	if !p.reverseRange.enabled() {
-		// Fixed-cpd configurations use a fixed reverse distance. Only the
-		// backwards byte is bounded here; the legacy forward format is intact.
+		// Fixed-distance mode: the response path uses the same fixed distance.
 		n := int(min(max(distance, 1), 256))
 		p.reverseRange = checkpointRange{n, n}
 	}
@@ -108,8 +94,7 @@ func wrapReverseCheckpointProcessor(next sdktrace.SpanProcessor) sdktrace.SpanPr
 
 func (p *reverseCheckpointProcessor) OnStart(parent context.Context, span sdktrace.ReadWriteSpan) {
 	p.SpanProcessor.OnStart(parent, span)
-	// Tomislav-RetCtx: the ranged PB/CGPB window records depth and the scheduling decision
-	// beside the span (wire_state.go); no attribute scan needed.
+	// Range-mode PB/CGPB and SB have depth and the scheduling decision in the wire entry.
 	if w := bridgeWires.load(span.SpanContext().SpanID()); w != nil {
 		w.rev = reverseSpanState{depth: uint64(w.depth), scheduled: w.priority}
 		return
@@ -120,15 +105,12 @@ func (p *reverseCheckpointProcessor) OnStart(parent context.Context, span sdktra
 			depth = n + 1
 		}
 	}
-	// Tomislav-RetCtx: ONE Attributes() call serves both the truss depth and the
-	// scheduling decision. Each call locks the span and runs dedupeAttrs, which
-	// allocates a fresh map every time (sdk/trace/span.go): the SDK defers dedupe to
-	// read time on the assumption that a span is written often and read once, at
-	// export. Reading it twice here cost more than the work being done.
+	// One Attributes call serves both the depth and the scheduling decision: each call locks the
+	// span and dedupes its attributes through a new map.
 	attrs := span.Attributes()
 	if p.kind == backend.SegPathCheckpoint || p.kind == backend.SegCallGraphCheckpoint || p.kind == backend.SegStructuralCheckpoint {
-		// These bridge formats already contain absolute depth. Use the SDK's
-		// value even when the parent did not send the auxiliary reverse depth.
+		// These formats carry the absolute depth, which is used even if the parent sent no response-path
+		// depth.
 		for _, attr := range attrs {
 			if attr.Key == AttrBREmit {
 				if d, ok := decodeBRDepth(attr.Value.AsString()); ok {
@@ -137,22 +119,18 @@ func (p *reverseCheckpointProcessor) OnStart(parent context.Context, span sdktra
 			}
 		}
 	}
-	// Vanilla has no truss depth; the auxiliary reverse depth carries it.
-	// Tomislav-RetCtx: preserve the OnStart role before reverse arrivals can
-	// create an additional checkpoint at OnEnd. Reverse emission must not change
-	// that role or reset its forward window.
-	// No SetAttributes here: depth and the scheduling decision never reach the wire,
-	// so they live beside the processor instead of on the span.
+	// Vanilla has no truss depth; the response-path baggage carries it. The scheduling decision is
+	// recorded now, before any returned truss can make the span a checkpoint at OnEnd.
 	p.states.store(span.SpanContext().SpanID(), &reverseSpanState{
 		depth: depth, scheduled: p.scheduled(attrs),
 	})
 }
 
-// OnEnd releases the per-span state after the bridge processor has exported. (Bridge spans
-// keep it in their wire entry, which the bridge's OnEnd frees.)
+// OnEnd forwards the span, then drops its state. Spans with a wire entry keep the state there, and the
+// bridge's OnEnd frees it.
 func (p *reverseCheckpointProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	p.SpanProcessor.OnEnd(s)
-	p.states.delete(s.SpanContext().SpanID()) // spans without a wire entry (vanilla, legacy fixed mode)
+	p.states.delete(s.SpanContext().SpanID()) // vanilla and fixed-distance spans
 }
 
 func (p *reverseCheckpointProcessor) state(id trace.SpanID) *reverseSpanState {
@@ -162,19 +140,14 @@ func (p *reverseCheckpointProcessor) state(id trace.SpanID) *reverseSpanState {
 	if state := p.states.load(id); state != nil {
 		return state
 	}
-	// A span the wrapper never saw at OnStart (or one already ended) still has to
-	// behave: treat it as depth 0 and unscheduled rather than failing the request.
+	// A span not seen at OnStart: treat it as depth 0 and unscheduled rather than failing the request.
 	return &reverseSpanState{}
 }
 
-// PrepareCheckpoint consumes __bag.rev_in and writes the SDK's final decision
-// before Span.End freezes the attributes. Tomislav-RetCtx: both client and server
-// spans spend one reverse hop or probability trial per truss. Repeated
-// preparation and fan-in spend none.
-// Tomislav-RetCtx: returns the carrier the caller should forward upstream, so the
-// generated wrapper no longer has to scan the span for a value written here one
-// stack frame earlier. That scan was the single largest consumer of Attributes()
-// in the deployed profile (31 % of it on composepost).
+// PrepareCheckpoint makes the span's response-path decision before Span.End freezes its attributes:
+// returned is the reverse context its children sent back. Each truss spends one hop (or one
+// probability trial) per span, client or server; preparing a span again spends nothing. It returns
+// the reverse context to pass on upstream.
 func (p *reverseCheckpointProcessor) PrepareCheckpoint(span trace.Span, returned string) string {
 	return p.prepare(span, returned, -1)
 }
@@ -188,7 +161,7 @@ func (p *reverseCheckpointProcessor) PrepareServerCheckpoint(span trace.Span, re
 // prepare is PrepareCheckpoint; children is the span's child count, or -1 if the caller does not
 // know it (then a server span's children attributes are read).
 func (p *reverseCheckpointProcessor) prepare(span trace.Span, returned string, children int) string {
-	if children < -1 { // Tomislav-RetCtx: invariant (invariants.go): a count, or -1 for "unknown"
+	if children < -1 {
 		brokenInt("a server span's child count is >= 0 (or -1: unknown)", "children", children, -1)
 	}
 	s, ok := span.(sdktrace.ReadWriteSpan)
@@ -197,18 +170,14 @@ func (p *reverseCheckpointProcessor) prepare(span trace.Span, returned string, c
 	}
 	state := p.state(s.SpanContext().SpanID())
 	if state.prepared {
-		// Repeated preparation is a no-op, but the caller still needs whatever the
-		// first call decided to forward.
+		// Already prepared: return what the first call decided to pass on.
 		return state.carried
 	}
 	state.prepared = true
 	depth, scheduled := state.depth, state.scheduled
-	// Tomislav-RetCtx: a bridge span with wire state has its truss (the raw emit payload) beside it,
-	// and the caller of PrepareServerCheckpoint says how many children it had.  The span's
-	// attributes (a locked copy through a map) are read only for what is not known otherwise: a
-	// legacy bridge's truss (no wire state), SB's force_lp (set on the span at any time,
-	// TestReverseTTLRespectsSyntheticForceLP), or a server span's children when the caller did not
-	// say.
+	// With wire state, the truss and (from PrepareServerCheckpoint) the child count are known. The
+	// span's attributes are read only for what is not: a fixed-distance bridge's truss, SB's force_lp,
+	// or a server span's children when the caller did not say.
 	var truss []byte
 	var forceLP bool
 	var attrs []attribute.KeyValue
@@ -242,10 +211,8 @@ func (p *reverseCheckpointProcessor) prepare(span trace.Span, returned string, c
 			emitted, returned = p.reversePolicy.route(returned, p.reversePolicy.terminates(scheduled, root), depth, rand.Float64)
 		}
 		if emitted != "" {
-			// Tomislav-RetCtx: a bridge span with wire state keeps the reverse context there, raw: the
-			// export folds it into the span's `_br` bytes (otlp_wire.go appendBridgeWireBytes, user
-			// 2026-10-29).  A span without wire state (vanilla, the legacy fixed-cpd mode) carries it
-			// as the `_rc` attribute, as text (the carrier is raw in the process).
+			// A span with wire state keeps the reverse context there, raw; the export folds it into
+			// `_br`. A span without wire state gets the `_rc` attribute, as text.
 			if w != nil {
 				w.rev.rc = emitted
 			} else {
@@ -255,15 +222,13 @@ func (p *reverseCheckpointProcessor) prepare(span trace.Span, returned string, c
 			backend.SampleLogCheckpoint(emitted)
 		}
 	}
-	// Only forced, unscheduled leaves may reject. Original checkpoints retain
-	// their own data; they terminate every returned truss unless reverse_passthrough
-	// is on (reversePolicy.terminates), in which case the policy routes it as above.
+	// Only forced, unscheduled leaves may decline. Scheduled checkpoints keep their own data and
+	// absorb every returned truss, unless reverse_passthrough is on.
 	if server && !hasChildren && !forceLP && !scheduled && !root && p.leafRejectRate > 0 && len(truss) > 0 {
 		if rand.Float64() < p.leafRejectRate {
 			var own string
 			if p.reversePolicy.probabilistic() {
-				// Tomislav-RetCtx: receivers use each leaf's existing origin depth;
-				// probability mode neither draws nor propagates a reverse TTL.
+				// Receivers use the leaf's depth; probability mode draws no TTL.
 				own = backend.EncodeCheckpointRetCtx(s.SpanContext().SpanID(), depth, p.kind, truss)
 			} else {
 				own = backend.EncodeCheckpointRetCtxWithTTL(s.SpanContext().SpanID(), depth, p.kind, truss, p.reverseRange.newTTL())
@@ -298,19 +263,18 @@ func (c *checkpointTracerProvider) PrepareServerCheckpoint(span trace.Span, retu
 	return c.CheckpointPreparer.PrepareCheckpoint(span, returned)
 }
 
-// isPathCheckpoint is shared by PB/CGPB finalization and export classification.
+// isPathCheckpoint is PB/CGPB classification, for callers without the attribute slice.
 func isPathCheckpoint(s sdktrace.ReadOnlySpan) bool {
 	return pathCheckpoint(s.SpanKind(), s.Attributes(), bridgeWires.load(s.SpanContext().SpanID()))
 }
 
-// pathCheckpoint classifies from the attribute slice the caller already holds. The scheduling
-// decision comes from the span's wire state when the ranged window recorded one
-// (Tomislav-RetCtx, wire_state.go), else from the legacy __bag.prio attribute.
+// pathCheckpoint classifies a PB/CGPB span from the attribute slice the caller holds. The
+// scheduling decision comes from the wire entry in range mode, else from __bag.prio.
 func pathCheckpoint(kind trace.SpanKind, attrs []attribute.KeyValue, w *bridgeWire) bool {
 	var priority, hasPriority, rejected, reverseCheckpoint bool
 	if w != nil {
 		priority, hasPriority = w.priority, true
-		rejected, reverseCheckpoint = w.rev.rejected, w.rev.rc != "" // reverseSpanState
+		rejected, reverseCheckpoint = w.rev.rejected, w.rev.rc != ""
 	}
 	for _, attr := range attrs {
 		switch attr.Key {
@@ -334,9 +298,7 @@ func isScheduledPathCheckpoint(attrs []attribute.KeyValue) bool {
 	return false
 }
 
-// Tomislav-RetCtx: both helpers take the attribute slice the caller already has.
-// They used to re-fetch it, which meant a second locked dedupe pass for data the
-// caller was holding.
+// The In variants take the attribute slice the caller already holds.
 func spanHasChildren(s sdktrace.ReadOnlySpan) bool { return spanHasChildrenIn(s.Attributes()) }
 
 func spanHasChildrenIn(attrs []attribute.KeyValue) bool {
@@ -378,8 +340,7 @@ func (p *StructuralBridgeProcessor) isCheckpoint(s sdktrace.ReadOnlySpan) bool {
 			forceLP = attr.Value.AsBool()
 		}
 	}
-	// Tomislav-RetCtx: SB shares the PB/CGPB window classification; force_lp
-	// keeps synthetic pressure spans ordinary.
+	// SB shares the PB/CGPB classification; force_lp keeps synthetic spans low priority.
 	_, _, _ = rejected, reverseCheckpoint, forceLP
 	return !forceLP && isPathCheckpoint(s)
 }
