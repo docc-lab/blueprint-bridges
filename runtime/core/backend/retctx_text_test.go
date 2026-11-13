@@ -59,8 +59,6 @@ func TestRetCtxRawAndText(t *testing.T) {
 	if _, fwd := RouteRetCtx(a, false); fwd == a || fwd[0] != packedRetCtxVersion {
 		t.Fatalf("a TTL step must re-pack the raw envelope: %q", fwd)
 	}
-	// A corrupt raw envelope is not merged: the valid side is kept as it is.
-	if got := MergeRetCtx(a, string([]byte{packedRetCtxVersion, 1, 200})); got != a {
-		t.Fatalf("corrupt envelope merged: %q", got)
-	}
+	// Merging a corrupt envelope is a broken invariant: it would lose the trusses in it.
+	mustBreakInvariant(t, "corrupt envelope merged", func() { MergeRetCtx(a, string([]byte{packedRetCtxVersion, 1, 200})) })
 }

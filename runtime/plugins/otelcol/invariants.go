@@ -21,3 +21,36 @@ func brokenInt(rule, what string, n, bound int) {
 func brokenRule(rule string) {
 	backend.InvariantBroken(rule)
 }
+
+//go:noinline
+func brokenOrder(rule, what string, n, bound int64) {
+	backend.InvariantBroken(rule, what, "=", n, " bound=", bound)
+}
+
+// checkExportCounts checks how a processor's span counters relate: a span is received, then
+// flushed, then sent or dropped, and each counter is incremented after the one before it. The
+// arguments must be loaded in the reverse order (sent and dropped first, received last), so an
+// increment that races the loads can only make the later counter larger.
+func checkExportCounts(sent, dropped, flushed, received int64) {
+	if sent+dropped > flushed {
+		brokenOrder("every sent or dropped span was flushed", "sent+dropped", sent+dropped, flushed)
+	}
+	if flushed > received {
+		brokenOrder("every flushed span was received", "flushed", flushed, received)
+	}
+}
+
+// checkPriorityCounts checks that the checkpoint and low-priority counts of something add up to no
+// more than its total; cp and lp must be loaded before total (see checkExportCounts).
+func checkPriorityCounts(what string, cp, lp, total int64) {
+	if cp+lp > total {
+		brokenOrder("checkpoint and low-priority counts add up to the total", what, cp+lp, total)
+	}
+}
+
+// checkDrainedCounts checks the exact relations once every export has finished (Shutdown).
+func checkDrainedCounts(sent, dropped, flushed int64) {
+	if sent+dropped != flushed {
+		brokenOrder("after shutdown every flushed span was sent or dropped", "sent+dropped", sent+dropped, flushed)
+	}
+}

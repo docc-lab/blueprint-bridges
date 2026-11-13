@@ -229,6 +229,10 @@ func (r *RefusedTraceIDs) snapshot(from int) (recs []refusedRecord, total int, s
 		from = total
 	}
 	recs = r.records[from:total] // append-only, so these elements stay valid
+	// Every high-priority refusal is also a refusal, and a trace is counted once per sighting at most.
+	if r.spansHP > r.spansAll || r.tracesHP > r.tracesAny || int64(r.tracesAny) > r.spansAll {
+		brokenOrder("refused high-priority counts stay within the totals", "spans_hp", r.spansHP, r.spansAll)
+	}
 	summary = map[string]int64{
 		"records": int64(total), "traces_hp": int64(r.tracesHP), "traces_any": int64(r.tracesAny),
 		"spans_hp": r.spansHP, "spans_all": r.spansAll, "dedup_traces": int64(len(r.cur) + len(r.prev)),

@@ -73,6 +73,9 @@ func packableRetCtx(t trussData) bool {
 
 func appendPackedSegment(buf []byte, segment TrussSegment) []byte {
 	tag := packedKindID[segment.Kind]
+	if tag == 0 || len(segment.Data) < 9 { // packableRetCtx admits only these
+		InvariantBroken("a packed segment has a checkpoint kind and a location", "kind=", segment.Kind, " bytes=", len(segment.Data))
+	}
 	body := len(segment.Data)
 	if segment.ReverseTTL != nil {
 		tag |= packedTTLPresent

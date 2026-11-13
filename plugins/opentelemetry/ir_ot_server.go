@@ -535,6 +535,7 @@ type {{.Name}} struct {
 }
 
 func New_{{.Name}}(ctx context.Context, service {{.Imports.NameOf .Service.UserType}}, coll_client {{.Imports.NameOf .CollIface.UserType}}) (*{{.Name}}, error) {
+	backend.CheckBridgeKind(coll_client, "sb") // the processor must be this bridge
 	handler := &{{.Name}}{}
 	handler.Service = service
 	handler.CollClient = coll_client
@@ -731,6 +732,7 @@ type {{.Name}} struct {
 }
 
 func New_{{.Name}}(ctx context.Context, service {{.Imports.NameOf .Service.UserType}}, coll_client {{.Imports.NameOf .CollIface.UserType}}) (*{{.Name}}, error) {
+	backend.CheckBridgeKind(coll_client, "vanilla") // the processor must be this bridge
 	handler := &{{.Name}}{}
 	handler.Service = service
 	handler.CollClient = coll_client
@@ -889,6 +891,7 @@ type {{.Name}} struct {
 }
 
 func New_{{.Name}}(ctx context.Context, service {{.Imports.NameOf .Service.UserType}}, coll_client {{.Imports.NameOf .CollIface.UserType}}) (*{{.Name}}, error) {
+	backend.CheckBridgeKind(coll_client, "cgpb") // the processor must be this bridge
 	handler := &{{.Name}}{}
 	handler.Service = service
 	handler.CollClient = coll_client
@@ -1052,6 +1055,7 @@ type {{.Name}} struct {
 }
 
 func New_{{.Name}}(ctx context.Context, service {{.Imports.NameOf .Service.UserType}}, coll_client {{.Imports.NameOf .CollIface.UserType}}) (*{{.Name}}, error) {
+	backend.CheckBridgeKind(coll_client, "pb") // the processor must be this bridge
 	handler := &{{.Name}}{}
 	handler.Service = service
 	handler.CollClient = coll_client

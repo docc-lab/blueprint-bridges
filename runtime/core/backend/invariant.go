@@ -37,3 +37,30 @@ func InvariantBroken(rule string, details ...any) {
 func IsPackedRetCtx(retCtx string) bool {
 	return len(retCtx) > 0 && retCtx[0] == packedRetCtxVersion
 }
+
+// CheckBridgeKind checks that the span processor behind tracer runs the bridge an instrumentation
+// was built for. instrumentation is the kind the instrumentation implements: "vanilla", "pb", "cgpb"
+// or "sb". A tracer that does not report its kind (a BridgeKind method) is not checked, and neither
+// are processor kinds without a matching instrumentation. The bridge kind is chosen twice, at build
+// time for the instrumentation (OT_BRIDGE) and at run time for the processor (BRIDGE_KIND); with two
+// different bridges, spans would be propagated by one bridge's rules and classified by another's.
+func CheckBridgeKind(tracer any, instrumentation string) {
+	r, ok := tracer.(interface{ BridgeKind() string })
+	if !ok {
+		return
+	}
+	kind := r.BridgeKind()
+	var want string
+	switch kind {
+	case "v":
+		want = "vanilla"
+	case "pb", "cgpb", "sb":
+		want = kind
+	default:
+		return
+	}
+	if want != instrumentation {
+		InvariantBroken("the span processor (BRIDGE_KIND) is the bridge the instrumentation was built for (OT_BRIDGE)",
+			"processor=", kind, " instrumentation=", instrumentation)
+	}
+}

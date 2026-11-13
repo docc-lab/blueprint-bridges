@@ -40,6 +40,7 @@ func NewHTTPServerMiddleware(ctx context.Context, tracer backend.Tracer, kind st
 		attrBaggage: startAttributeBaggage(tracer),
 		reverse:     backend.ReverseTrussEnabled(),
 	}
+	checkProcessorKind(tracer, s.v)
 	return func(service, method string, next http.Handler) http.Handler {
 		return &httpServerHandler{s: s, m: newMethodInfo(tp, serverSpanNames, service, method), next: next}
 	}, nil

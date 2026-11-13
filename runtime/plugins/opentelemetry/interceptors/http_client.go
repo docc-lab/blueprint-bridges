@@ -28,6 +28,7 @@ func NewHTTPClientMiddleware(ctx context.Context, tracer backend.Tracer, kind st
 		attrBaggage: startAttributeBaggage(tracer),
 		reverse:     backend.ReverseTrussEnabled(),
 	}
+	checkProcessorKind(tracer, c.v)
 	return func(service string, next http.RoundTripper) http.RoundTripper {
 		return &tracedTransport{c: c, service: service, next: next}
 	}, nil

@@ -148,6 +148,13 @@ func EncodeCheckpointRetCtxWithTTL(spanID trace.SpanID, depth uint64, kind strin
 }
 
 func encodeCheckpointRetCtx(spanID trace.SpanID, depth uint64, kind string, truss []byte, ttl *byte) string {
+	// Callers are the span processors, encoding a truss for one of their own spans.
+	if !spanID.IsValid() {
+		InvariantBroken("a checkpoint truss names a valid span", "spanID=", spanID)
+	}
+	if _, ok := packedKindID[kind]; !ok {
+		InvariantBroken("a checkpoint truss has a checkpoint kind", "kind=", kind)
+	}
 	data := append([]byte(nil), spanID[:]...)
 	data = binary.AppendUvarint(data, depth)
 	data = append(data, truss...)
@@ -329,13 +336,16 @@ func MergeRetCtx(a, b string) string {
 	if merged, ok := mergePackedRetCtx(a, b); ok {
 		return merged
 	}
+	// Both come from this process's merges and checkpoint preparation, or from children, whose
+	// reverse contexts the instrumentation checks on arrival; one that does not decode would lose
+	// the trusses in it.
 	ta, oka := decodeTruss(a)
 	tb, okb := decodeTruss(b)
 	if !oka {
-		return b
+		InvariantBroken("a reverse context being merged decodes", "len=", len(a))
 	}
 	if !okb {
-		return a
+		InvariantBroken("a reverse context being merged decodes", "len=", len(b))
 	}
 	m, k := ta.M, ta.K
 	if m == 0 {

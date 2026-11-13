@@ -137,12 +137,17 @@ func (p *VanillaProcessor) logMetrics() {
 	p.spanLock.Lock()
 	bufDepth := len(p.spanBuf)
 	p.spanLock.Unlock()
+	// Loaded later-incremented first, for the order checks (checkExportCounts).
+	sent, dropped := atomic.LoadInt64(&p.spansSent), atomic.LoadInt64(&p.spansDropped)
+	flushed := atomic.LoadInt64(&p.spansFlushed)
+	received := atomic.LoadInt64(&p.spansReceived)
+	checkExportCounts(sent, dropped, flushed, received)
 	slog.Info("vanilla_processor_metrics",
-		"spans_received", atomic.LoadInt64(&p.spansReceived),
-		"spans_flushed", atomic.LoadInt64(&p.spansFlushed),
-		"spans_sent", atomic.LoadInt64(&p.spansSent),
+		"spans_received", received,
+		"spans_flushed", flushed,
+		"spans_sent", sent,
 		"batches_sent", atomic.LoadInt64(&p.batchesSent),
-		"spans_dropped", atomic.LoadInt64(&p.spansDropped),
+		"spans_dropped", dropped,
 		"batches_dropped", atomic.LoadInt64(&p.batchesDropped),
 		"send_deadline", atomic.LoadInt64(&p.sendDeadline),
 		"send_unavailable", atomic.LoadInt64(&p.sendUnavailable),
@@ -185,7 +190,12 @@ func (p *VanillaProcessor) processEvents() {
 			p.flushBuffer()
 			return
 		case <-ticker.C:
-			go p.flushBuffer()
+			// Tracked like the exports it starts, so Shutdown waits for it too.
+			p.exportWG.Add(1)
+			go func() {
+				defer p.exportWG.Done()
+				p.flushBuffer()
+			}()
 		}
 	}
 }
@@ -297,6 +307,7 @@ func (p *VanillaProcessor) Shutdown(ctx context.Context) error {
 	close(p.stopChan) // processEvents flushes one last time
 	p.wg.Wait()
 	p.exportWG.Wait()
+	checkDrainedCounts(atomic.LoadInt64(&p.spansSent), atomic.LoadInt64(&p.spansDropped), atomic.LoadInt64(&p.spansFlushed))
 
 	if err := p.conn.close(); err != nil {
 		slog.Error("❌ Failed to stop client", "error", err)

@@ -131,6 +131,9 @@ func (p reversePolicy) route(retCtx string, originalCheckpoint bool, depth uint6
 	}
 	return backend.RouteRetCtxWithDecision(retCtx, originalCheckpoint, func(cp backend.ReturnedCheckpoint) bool {
 		probability := p.probabilityAt(depth, cp.Depth)
+		if !(probability >= 0 && probability <= 1) { // also rejects NaN
+			brokenRule("a reverse policy's probability is within [0,1]")
+		}
 		return probability >= 1 || (probability > 0 && draw() < probability)
 	})
 }

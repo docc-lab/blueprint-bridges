@@ -65,7 +65,9 @@ func NewServerInterceptor(ctx context.Context, tracer backend.Tracer, kind strin
 	if err != nil {
 		return nil, err
 	}
-	return serverInterceptor(tp, variantFor(kind), startAttributeBaggage(tracer)), nil // server.go; below
+	v := variantFor(kind)
+	checkProcessorKind(tracer, v)
+	return serverInterceptor(tp, v, startAttributeBaggage(tracer)), nil // server.go; below
 }
 
 // NewClientInterceptor returns the tracing client interceptor for the given bridge kind.
@@ -75,7 +77,9 @@ func NewClientInterceptor(ctx context.Context, tracer backend.Tracer, kind strin
 	if err != nil {
 		return nil, err
 	}
-	return clientInterceptor(tp, variantFor(kind), startAttributeBaggage(tracer)), nil // client.go; below
+	v := variantFor(kind)
+	checkProcessorKind(tracer, v)
+	return clientInterceptor(tp, v, startAttributeBaggage(tracer)), nil // client.go; below
 }
 
 // A variant is what one bridge kind adds on top of plain (vanilla) tracing.  The four wrapper

@@ -39,7 +39,7 @@ func headSampler() tracesdk.Sampler {
 // BridgeKindEnv selects the span processor when a service starts. The wiring specs set it for each
 // service variant. Values:
 //
-//	pb       path bridge (also used when unset or unknown)
+//	pb       path bridge (also used when unset)
 //	cgpb     call-graph path bridge
 //	sb       structural bridge
 //	eb       exact bridge
@@ -54,13 +54,15 @@ type OTCollectorTracer struct {
 	tp trace.TracerProvider
 	// startAttrBaggage reports whether the span processor adds "__bag." attributes in OnStart.
 	startAttrBaggage bool
+	kind             string // the processor's kind: v, pb, cgpb, sb, eb, rc, priority or realtime
 }
 
 // NewOTCollectorTracer creates a tracer that exports to the collector at addr. additionalPort is the
 // collector's config discovery port, from which the bridges read their parameters.
 //
-// The span processor is chosen by [BridgeKindEnv]. An unknown value logs a warning and falls back
-// to the path bridge.
+// The span processor is chosen by [BridgeKindEnv]. An unknown value is a broken invariant: the
+// instrumentation was built for a kind of its own, and a different processor would build wrong
+// traces.
 func NewOTCollectorTracer(ctx context.Context, addr string, additionalPort string) (*OTCollectorTracer, error) {
 	kind := os.Getenv(BridgeKindEnv)
 	spanProcessor, resolvedKind, err := newBridgeProcessor(ctx, kind, addr, additionalPort)
@@ -83,9 +85,9 @@ func NewOTCollectorTracer(ctx context.Context, addr string, additionalPort strin
 		tracesdk.WithSpanProcessor(spanProcessor),
 	)
 	if preparer, ok := spanProcessor.(backend.CheckpointPreparer); ok {
-		return &OTCollectorTracer{&checkpointTracerProvider{tp, preparer}, startAttrBaggage}, nil
+		return &OTCollectorTracer{&checkpointTracerProvider{tp, preparer}, startAttrBaggage, resolvedKind}, nil
 	}
-	return &OTCollectorTracer{tp, startAttrBaggage}, nil
+	return &OTCollectorTracer{tp, startAttrBaggage, resolvedKind}, nil
 }
 
 // newBridgeProcessor creates the processor for a BRIDGE_KIND value. It also returns the kind it
@@ -141,18 +143,18 @@ func newBridgeProcessor(ctx context.Context, kind, addr, port string) (tracesdk.
 		}
 		return p, "realtime", nil
 	default:
-		slog.Warn("⚠️ Unknown BRIDGE_KIND, falling back to path-bridge", "value", kind)
-		p, err := NewPathBridgeProcessor(ctx, addr, port)
-		if err != nil {
-			return nil, "pb (fallback)", fmt.Errorf("failed to create path-bridge span processor: %w", err)
-		}
-		return p, "pb (fallback)", nil
+		backend.InvariantBroken("BRIDGE_KIND is a known span processor kind", "BRIDGE_KIND=", kind)
+		return nil, "", nil // not reached
 	}
 }
 
 // StartAttributeBaggage implements [backend.AttributeBaggageReporter]. The sampler adds no
 // attributes, so only the span processor matters.
 func (t *OTCollectorTracer) StartAttributeBaggage() bool { return t.startAttrBaggage }
+
+// BridgeKind returns the span processor's kind, so the instrumentation can check that it was built
+// for the same bridge.
+func (t *OTCollectorTracer) BridgeKind() string { return t.kind }
 
 // GetTracerProvider implements [backend.Tracer].
 func (t *OTCollectorTracer) GetTracerProvider(ctx context.Context) (trace.TracerProvider, error) {

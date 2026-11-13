@@ -127,3 +127,54 @@ func TestInvariantPrepareChildren(t *testing.T) {
 	}
 	mustBreakInvariant(t, "child count -2", func() { p.prepare(noop, "", -2) })
 }
+
+// The export counters: received, then flushed, then sent or dropped, split into checkpoint and
+// low-priority counts; exact once every export has finished.
+func TestInvariantCounterOrder(t *testing.T) {
+	checkExportCounts(2, 1, 3, 5)
+	checkPriorityCounts("sent", 1, 1, 2)
+	checkDrainedCounts(2, 1, 3)
+	mustBreakInvariant(t, "more sent or dropped than flushed", func() { checkExportCounts(2, 2, 3, 5) })
+	mustBreakInvariant(t, "more flushed than received", func() { checkExportCounts(0, 0, 6, 5) })
+	mustBreakInvariant(t, "priority counts above the total", func() { checkPriorityCounts("sent", 2, 1, 2) })
+	mustBreakInvariant(t, "a flushed span neither sent nor dropped at shutdown", func() { checkDrainedCounts(1, 1, 3) })
+}
+
+// A checkpoint distance is drawn from a range within 1..256, and a reverse policy's probability is
+// within [0,1].
+func TestInvariantDistanceAndProbability(t *testing.T) {
+	if ttl := (checkpointRange{256, 256}).newTTL(); ttl != 255 {
+		t.Fatalf("distance 256 gives TTL %d", ttl)
+	}
+	for _, r := range []checkpointRange{{}, {5, 4}, {1, 257}} {
+		mustBreakInvariant(t, "bad range", func() { r.newTTL() })
+	}
+	truss := backend.EncodeCheckpointRetCtx(trace.SpanID{1}, 3, backend.SegPathCheckpoint, nil)
+	draw := func() float64 { return 0.5 }
+	reversePolicy{mode: reversePolicyDepthCubic}.route(truss, false, 1, draw)
+	mustBreakInvariant(t, "probability above 1", func() {
+		reversePolicy{mode: reversePolicyProbability, probability: 1.5}.route(truss, false, 1, draw)
+	})
+}
+
+// The retry queue: a retried batch has spans and bytes, its counts return to zero, and every
+// outcome follows a scheduled retry.
+func TestInvariantRetryGate(t *testing.T) {
+	g := newRetryGate(retryAll, "1")
+	mustBreakInvariant(t, "empty batch retried", func() { g.scheduleBytes(0, 1, func() error { return nil }, func(error) {}) })
+	g = newRetryGate(retryAll, "1")
+	g.retryOKSpans.Store(1)
+	mustBreakInvariant(t, "outcome without a retry", func() { g.fields() })
+}
+
+// The refusal counts: high-priority counts stay within the totals.
+func TestInvariantRefusedCounts(t *testing.T) {
+	r := newRefusedTraceIDs(false)
+	r.spansHP, r.spansAll = 2, 1
+	mustBreakInvariant(t, "more high-priority than all refused spans", func() { r.snapshot(0) })
+}
+
+// An unknown BRIDGE_KIND stops the process instead of running some other bridge's processor.
+func TestInvariantUnknownBridgeKind(t *testing.T) {
+	mustBreakInvariant(t, "unknown kind", func() { newBridgeProcessor(context.Background(), "pbb", "", "") })
+}

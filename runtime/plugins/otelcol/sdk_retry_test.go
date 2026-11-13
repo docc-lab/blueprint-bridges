@@ -93,7 +93,8 @@ func TestRetryGateAllModeDoesNotSuppress(t *testing.T) {
 	g := newRetryGate(retryAll, "20")
 	var wg sync.WaitGroup
 	wg.Add(1)
-	g.schedule(nil, 1, func() error { return nil }, func(error) { wg.Done() })
+	batch := []*tracepb.ResourceSpans{{ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{Name: "a"}}}}}}
+	g.schedule(batch, 1, func() error { return nil }, func(error) { wg.Done() })
 	if g.suppressLP() {
 		t.Error("vanilla's retry-all mode must never suppress")
 	}

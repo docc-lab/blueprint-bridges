@@ -116,6 +116,9 @@ func (g *retryGate) schedule(events []*tracepb.ResourceSpans, n int64, resend fu
 
 // scheduleBytes is schedule for an encoded batch of size bytes.
 func (g *retryGate) scheduleBytes(size, n int64, resend func() error, done func(error)) {
+	if n < 1 || size < 1 { // a refused batch has spans and request bytes
+		brokenOrder("a retried batch has spans and bytes", "spans", n, size)
+	}
 	g.pendingBatches.Add(1)
 	spans := g.pendingSpans.Add(n)
 	bytes := g.pendingBytes.Add(size)
@@ -128,9 +131,10 @@ func (g *retryGate) scheduleBytes(size, n int64, resend func() error, done func(
 	go func() {
 		time.Sleep(wait)
 		err := resend()
-		g.pendingSpans.Add(-n)
-		g.pendingBytes.Add(-size)
-		g.pendingBatches.Add(-1)
+		spans, bytes, batches := g.pendingSpans.Add(-n), g.pendingBytes.Add(-size), g.pendingBatches.Add(-1)
+		if spans < 0 || bytes < 0 || batches < 0 { // each retry takes back exactly what it added
+			brokenOrder("the pending retry counts stay non-negative", "batches", batches, 0)
+		}
 		if err == nil {
 			g.retryOKSpans.Add(n)
 		} else {
@@ -151,6 +155,12 @@ func (g *retryGate) logMetrics() {
 
 // fields returns the retry gauges and restarts the high-water window.
 func (g *retryGate) fields() []any {
+	// A retry's outcome is counted after the retry itself (see checkExportCounts for the order).
+	ok, failed := g.retryOKSpans.Load(), g.retryFailSpans.Load()
+	retried := g.retriedSpans.Load()
+	if ok+failed > retried {
+		brokenOrder("every accepted or refused retry was scheduled", "ok+failed", ok+failed, retried)
+	}
 	return []any{
 		"retry_mode_" + g.mode, 1,
 		"retry_delay_ms", g.delay.Milliseconds(),
@@ -160,9 +170,9 @@ func (g *retryGate) fields() []any {
 		"retry_window_max_bytes", g.winMaxBytes.Swap(g.pendingBytes.Load()),
 		"retry_max_spans", g.maxSpans.Load(),
 		"retry_max_bytes", g.maxBytes.Load(),
-		"retried_spans", g.retriedSpans.Load(),
-		"retry_ok_spans", g.retryOKSpans.Load(),
-		"retry_fail_spans", g.retryFailSpans.Load(),
+		"retried_spans", retried,
+		"retry_ok_spans", ok,
+		"retry_fail_spans", failed,
 		"lp_suppressed_spans", g.lpSuppressed.Load(),
 	}
 }

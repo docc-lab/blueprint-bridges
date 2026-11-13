@@ -76,6 +76,9 @@ func (r checkpointRange) next(parentTTL byte, hasParent bool) (checkpoint bool, 
 
 // newTTL draws a distance from the range. Checkpoints and rejected leaves draw independently.
 func (r checkpointRange) newTTL() byte {
+	if r.min < 1 || r.min > r.max || r.max > 256 { // parseCheckpointRange, or a fixed distance in 1..256
+		brokenInt("a checkpoint range is within 1..256", "min", r.min, r.max)
+	}
 	return byte(r.min + rand.IntN(r.max-r.min+1) - 1)
 }
 

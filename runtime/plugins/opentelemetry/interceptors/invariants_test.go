@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/blueprint-uservices/blueprint/runtime/core/backend"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/metadata"
 )
@@ -94,4 +95,32 @@ func TestInvariantReverseContextSent(t *testing.T) {
 	bad := backend.WithRetMerge(context.Background())
 	backend.AddToMerge(bad, "not packed")
 	mustBreakInvariant(t, "unpacked reverse context", func() { serverRetCtx(bad, tp, span, 0, nil) })
+}
+
+type kindTracer struct {
+	staticTracer
+	kind string
+}
+
+func (k kindTracer) BridgeKind() string { return k.kind }
+
+// The span processor must be the bridge the instrumentation was built for; kinds without a matching
+// instrumentation variant are not compared.
+func TestInvariantProcessorKind(t *testing.T) {
+	ctx := context.Background()
+	tp := sdktrace.NewTracerProvider()
+	for _, ok := range []struct{ processor, kind string }{{"v", "vanilla"}, {"pb", "pb"}, {"pb", ""}, {"cgpb", "cgpb"}, {"sb", "sb"}, {"rc", "rc"}} {
+		tracer := kindTracer{staticTracer{tp}, ok.processor}
+		if _, err := NewServerInterceptor(ctx, tracer, ok.kind); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := NewHTTPClientMiddleware(ctx, tracer, ok.kind); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mismatch := kindTracer{staticTracer{tp}, "pb"}
+	mustBreakInvariant(t, "gRPC server", func() { NewServerInterceptor(ctx, mismatch, "sb") })
+	mustBreakInvariant(t, "gRPC client", func() { NewClientInterceptor(ctx, mismatch, "cgpb") })
+	mustBreakInvariant(t, "HTTP server", func() { NewHTTPServerMiddleware(ctx, mismatch, "v") })
+	mustBreakInvariant(t, "HTTP client", func() { NewHTTPClientMiddleware(ctx, mismatch, "sb") })
 }

@@ -62,3 +62,9 @@ func brokenCount(rule, what string, n, bound int) {
 func brokenValue(rule, what, value string) {
 	backend.InvariantBroken(rule, what, "=", value)
 }
+
+// checkProcessorKind checks that the tracer's span processor is the bridge this instrumentation was
+// built for (backend.CheckBridgeKind).
+func checkProcessorKind(tracer backend.Tracer, v variant) {
+	backend.CheckBridgeKind(tracer, v.name)
+}

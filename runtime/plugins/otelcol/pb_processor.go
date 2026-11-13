@@ -194,19 +194,30 @@ func (p *PathBridgeProcessor) logMetrics() {
 	hpDepth := len(p.hpBuf)
 	lpDepth := len(p.lpBuf)
 	p.eventsLock.Unlock()
+	// Loaded later-incremented first, for the order checks (checkExportCounts).
+	cpSent, lpSent := atomic.LoadInt64(&p.cpSent), atomic.LoadInt64(&p.lpSent)
+	cpDropped, lpDropped := atomic.LoadInt64(&p.cpDropped), atomic.LoadInt64(&p.lpDropped)
+	sent, dropped := atomic.LoadInt64(&p.spansSent), atomic.LoadInt64(&p.spansDropped)
+	flushed := atomic.LoadInt64(&p.spansFlushed)
+	cpReceived, lpReceived := atomic.LoadInt64(&p.cpReceived), atomic.LoadInt64(&p.lpReceived)
+	received := atomic.LoadInt64(&p.spansReceived)
+	checkExportCounts(sent, dropped, flushed, received)
+	checkPriorityCounts("sent", cpSent, lpSent, sent)
+	checkPriorityCounts("dropped", cpDropped, lpDropped, dropped)
+	checkPriorityCounts("received", cpReceived, lpReceived, received)
 	slog.Info("pb_processor_metrics",
-		"spans_received", atomic.LoadInt64(&p.spansReceived),
-		"spans_flushed", atomic.LoadInt64(&p.spansFlushed),
-		"spans_sent", atomic.LoadInt64(&p.spansSent),
+		"spans_received", received,
+		"spans_flushed", flushed,
+		"spans_sent", sent,
 		"batches_sent", atomic.LoadInt64(&p.batchesSent),
-		"spans_dropped", atomic.LoadInt64(&p.spansDropped),
+		"spans_dropped", dropped,
 		"batches_dropped", atomic.LoadInt64(&p.batchesDropped),
-		"cp_received", atomic.LoadInt64(&p.cpReceived),
-		"lp_received", atomic.LoadInt64(&p.lpReceived),
-		"cp_sent", atomic.LoadInt64(&p.cpSent),
-		"lp_sent", atomic.LoadInt64(&p.lpSent),
-		"cp_dropped", atomic.LoadInt64(&p.cpDropped),
-		"lp_dropped", atomic.LoadInt64(&p.lpDropped),
+		"cp_received", cpReceived,
+		"lp_received", lpReceived,
+		"cp_sent", cpSent,
+		"lp_sent", lpSent,
+		"cp_dropped", cpDropped,
+		"lp_dropped", lpDropped,
 		"send_deadline", atomic.LoadInt64(&p.sendDeadline),
 		"send_unavailable", atomic.LoadInt64(&p.sendUnavailable),
 		"send_exhausted", atomic.LoadInt64(&p.sendExhausted),
@@ -248,7 +259,12 @@ func (p *PathBridgeProcessor) processEvents() {
 			p.flushBuffer()
 			return
 		case <-ticker.C:
-			go p.flushBuffer()
+			// Tracked like the exports it starts, so Shutdown waits for it too.
+			p.exportWG.Add(1)
+			go func() {
+				defer p.exportWG.Done()
+				p.flushBuffer()
+			}()
 		}
 	}
 }
@@ -699,6 +715,7 @@ func (p *PathBridgeProcessor) Shutdown(ctx context.Context) error {
 	close(p.stopChan)
 	p.wg.Wait()
 	p.exportWG.Wait()
+	checkDrainedCounts(atomic.LoadInt64(&p.spansSent), atomic.LoadInt64(&p.spansDropped), atomic.LoadInt64(&p.spansFlushed))
 
 	if err := p.conn.close(); err != nil {
 		slog.Error("❌ Failed to stop client", "error", err)
