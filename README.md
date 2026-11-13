@@ -1,58 +1,94 @@
-<p align="center">
-  <img src="https://github.com/Blueprint-uServices/Blueprint-uServices.github.io/blob/main/assets/img/blueprint_logo_small.png" width=200/>
-</p>
+# Blueprint Bridges
 
-Blueprint is an extensible compiler for microservice applications, along with a collection of off-the-shelf microservice benchmark applications.
+Blueprint Bridges adds trace checkpointing to the OpenTelemetry tracing of
+[Blueprint](https://github.com/blueprint-uservices/blueprint), a compiler for microservice
+applications.
 
-Using Blueprint, you can:
- * Run a number of off-the-shelf microservice applications and use them for your benchmarking, prototyping, and research experimentation.
- * Change and reconfigure those off-the-shelf applications, so that they use different frameworks, infrastructure, and deployment choices.
- * Easily develop your own microservice applications and leverage Blueprint's built-in features that decouple your application's logic from (Blueprint-generated) boilerplate.
- * Prototype and develop your own microservice *infrastructure*, and integrate and evaluate your infrastructure with all of the existing applications.
+When a tracing pipeline is overloaded it drops spans, and a trace that has lost spans can no longer
+be pieced together. The span processors in this repository, the *bridges*, export a small share of
+spans as high-priority *checkpoints*. Each checkpoint carries a compact record of the call path
+around it, enough to place the spans that survive between checkpoints. The collector can then shed
+low-priority spans first and the traces remain reconstructable.
 
-Blueprint is particularly aimed at **prototyping and experimentation** use cases.  It is intended for use by anybody, but particularly researchers and practitioners wanting to experiment with microservice applications.  Its central goal is to reduce the amount of effort involved when changing and re-compiling the infrastructure choices of a microservice application.  
+This repository is a fork of Blueprint. Blueprint's compiler, plugins and applications work as
+documented in its [user manual](docs/manual).
 
-## Status
+## Contents
 
-Blueprint is currently pre-release with most initial features implemented.  However, some features may not be implemented yet, some applications may be incomplete, and some aspects of the user guide may be empty.  Please join the [blueprint-uservices](https://blueprint-uservices.slack.com/) Slack if you have any questions, requests, or comments.
+| Path | Contents |
+|---|---|
+| [`runtime/plugins/otelcol`](runtime/plugins/otelcol) | The span processors: the bridges, a vanilla baseline, the response path and the OTLP export |
+| [`runtime/core/backend`](runtime/core/backend) | The trace carrier and the reverse context, shared by the instrumentation and the processors |
+| [`runtime/plugins/opentelemetry/interceptors`](runtime/plugins/opentelemetry/interceptors) | Tracing instrumentation as gRPC interceptors and HTTP middleware |
+| [`plugins/opentelemetry`](plugins/opentelemetry) | Wiring functions that instrument services, and the generated wrapper instrumentation |
+| [`plugins/otelcol`](plugins/otelcol) | Deploys the OpenTelemetry Collector the processors export to |
+| [`plugins/grpc`](plugins/grpc), [`plugins/http`](plugins/http) | Support for interceptors and middleware in general, not only for tracing |
+| [`examples/dsb_sn`](examples/dsb_sn), [`examples/dsb_hotel`](examples/dsb_hotel) | DeathStarBench Social Network and Hotel Reservation, with the variants used in experiments |
+| [`examples/leaf`](examples/leaf) | Small synthetic service graphs for testing |
+| [`k8s-convert`](k8s-convert), [`d2k8s`](d2k8s) | Tools that turn generated Docker Compose deployments into Kubernetes manifests |
+| [`utils`](utils) | Scripts that build, deploy and measure the applications on a cluster |
 
-## Getting Started
+The other applications from Blueprint (Sock Shop, Train Ticket and the greeter examples) are in
+[`examples`](examples).
 
-See the 📖[Getting Started](docs/manual/gettingstarted.md) page of the User Manual to get started compiling and running your first Blueprint application.
+## Bridges
 
-## Resources
+| Processor | `BRIDGE_KIND` | What a checkpoint records |
+|---|---|---|
+| Vanilla | `v` | No checkpoints: plain OpenTelemetry export, the baseline |
+| Path bridge (PB) | `pb` | The checkpoint above it and a Bloom filter of the spans in between |
+| Call-graph path bridge (CGPB) | `cgpb` | PB, plus the spans where the call path branches |
+| Structural bridge (SB) | `sb` | CGPB, plus the order in which siblings started and ended |
 
-📘[User Manual](docs/manual)
+Checkpoints are spaced a configurable number of hops apart, the checkpoint distance. The bridges
+export their spans in separate high- and low-priority batches, marked with the `bridges-priority`
+gRPC metadata. With `REVERSE_TRUSS=on`, responses also carry a *reverse context* back up the call
+path, so a checkpoint can be exported by an ancestor instead of the span that produced it.
 
-📚[Applications](examples) - off-the-shelf applications that come packaged with Blueprint\
-📝[Wiring Spec Plugins](plugins) - plugins that come packaged with Blueprint that can be used in wiring specs to modify applications\
-📓[Workflow Spec Backends](runtime/core) - backend interfaces that can be used in workflow specs when developing applications
+The processors read their parameters (checkpoint distance, reverse-path policy) from the collector
+when they start, and the collector admits or refuses each batch by its priority. That collector
+component is a processor for the OpenTelemetry Collector, maintained in a separate repository.
 
-### API Documentation on go.dev
+## Getting started
 
-🚀[Blueprint Compiler](https://pkg.go.dev/github.com/blueprint-uservices/blueprint/blueprint)\
-🚀[Blueprint Plugins](https://pkg.go.dev/github.com/blueprint-uservices/blueprint/plugins)\
-🚀[Blueprint Runtime Components](https://pkg.go.dev/github.com/blueprint-uservices/blueprint/runtime)
+Start with Blueprint's [requirements](docs/manual/requirements.md) and
+[getting started](docs/manual/gettingstarted.md) guide.
 
-## Project
+To trace a service with a bridge, instrument it in the wiring spec:
 
-If you anticipate making use of Blueprint for your research project, we recommend familiarizing yourself with the SOSP 2023 publication below, which outlines and demonstrates some motivating use cases for Blueprint.
+```go
+collector := otelcol.Collector(spec, "otelcol", jaegerCollector, 8080, "jaeger")
 
-📄[Blueprint: A Toolchain for Highly-Reconfigurable Microservices](https://blueprint-uservices.github.io/assets/pdf/anand2023blueprint.pdf)\
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Vaastav Anand, Deepak Garg, Antoine Kaufmann, Jonathan Mace\
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*29th ACM Symposium on Operating Systems Principles (SOSP '23)*
+opentelemetry.InstrumentGRPC(spec, serviceName, collector)
+grpc.Deploy(spec, serviceName)
+```
 
-If you are looking for the artifact that was evaluated for the SOSP paper, it can be found [here](https://gitlab.mpi-sws.org/cld/blueprint), though it is not maintained.  Instead we recommend using the Blueprint implementation contained in this repository.
+The bridge is chosen when compiling, with `OT_BRIDGE`, and when running, with `BRIDGE_KIND` in each
+service's environment; the two must match. For example, the Social Network with the structural
+bridge (its specs set `BRIDGE_KIND` in every generated container):
 
-### Mailing List & Slack
+```sh
+cd examples/dsb_sn/wiring
+OT_BRIDGE=sb go run main.go -w docker_sb_es_bd -o build
+```
 
- * Slack: [blueprint-uservices](https://blueprint-uservices.slack.com/)
- * Google Group (mailing list): [blueprint-uservices](https://groups.google.com/g/blueprint-uservices)
+[Interceptors and Middleware](docs/manual/interceptors.md) describes the instrumentation, its
+settings and how to write your own interceptors. [Running an application](docs/manual/running.md)
+covers deployment.
 
-### Contributors
+## Tests
 
-We are a team of researchers:
- * [Vaastav Anand](https://vaastavanand.com/), PhD student at the Max Planck Institute for Software Systems (MPI-SWS)
- * [Jonathan Mace](https://www.microsoft.com/en-us/research/people/jonathanmace/), Researcher at Microsoft Research and Adjunct Faculty at the Max Planck Institute for Software Systems (MPI-SWS)
+```sh
+cd runtime
+go test ./core/backend/ ./plugins/otelcol/ ./plugins/opentelemetry/interceptors/
+```
 
-If you are interested in contributing, please contact us on Slack!
+## Credits and license
+
+Blueprint is the work of Vaastav Anand, Deepak Garg, Antoine Kaufmann and Jonathan Mace:
+
+> Vaastav Anand, Deepak Garg, Antoine Kaufmann, Jonathan Mace.
+> [Blueprint: A Toolchain for Highly-Reconfigurable Microservices](https://blueprint-uservices.github.io/assets/pdf/anand2023blueprint.pdf).
+> *29th ACM Symposium on Operating Systems Principles (SOSP '23)*.
+
+This repository is distributed under Blueprint's BSD 3-Clause license; see [`LICENSE`](LICENSE).
