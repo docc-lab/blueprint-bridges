@@ -11,21 +11,21 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-func referenceWindowPayloads(r checkpointRange, depth int, anchor [8]byte, distance int, inherited, ha []byte,
+func referenceWindowPayloads(r checkpointRange, depth int, anchor [8]byte, distance int, inherited, witness []byte,
 	isCheckpoint bool, outgoingTTL byte, sid trace.SpanID) (emit, wrapped []byte) {
 	geometry := checkpointBlooms[distance-1]
 	filter := bloom.NewFromBytes(inherited, geometry.m, geometry.k)
-	emit = packCheckpointWindowBR(depth, anchor, distance, filter.Bytes(), ha)
+	emit = packCheckpointWindowBR(depth, anchor, distance, filter.Bytes(), witness)
 	if isCheckpoint {
 		anchor = [8]byte(sid)
 		distance = int(outgoingTTL) + 1
 		geometry = checkpointBlooms[distance-1]
 		filter = bloom.New(geometry.m, geometry.k)
-		ha = nil
+		witness = nil
 	} else {
 		filter.AddPrehashed(sid[:])
 	}
-	return emit, r.wrap(outgoingTTL, packCheckpointWindowBR(depth, anchor, distance, filter.Bytes(), ha))
+	return emit, r.wrap(outgoingTTL, packCheckpointWindowBR(depth, anchor, distance, filter.Bytes(), witness))
 }
 
 func TestEncodeWindowPayloadsMatchesFilterPath(t *testing.T) {
@@ -47,28 +47,24 @@ func TestEncodeWindowPayloadsMatchesFilterPath(t *testing.T) {
 			inherited = make([]byte, g.bytes)
 			rng.Read(inherited)
 		}
-		var ha []byte
-		if rng.Intn(3) == 0 {
-			ha = make([]byte, 9*rng.Intn(4))
-			rng.Read(ha)
-		}
 		var anchor [8]byte
 		var sid trace.SpanID
 		rng.Read(anchor[:])
 		rng.Read(sid[:])
 		depth := rng.Intn(1 << uint(rng.Intn(20)))
+		witness := randomWitness(rng, depth)
 		isCheckpoint := rng.Intn(2) == 0
 		ttl := byte(rng.Intn(256))
 		if inherited != nil && len(inherited) != g.bytes {
 			// A parent filter of the wrong width cannot come out of unpackCheckpointWindowBR, so the
 			// encoder treats one as a broken invariant.
 			mustBreakInvariant(t, "wrong-width inherited Bloom", func() {
-				encodeWindowPayloads(r, depth, anchor, distance, inherited, ha, isCheckpoint, ttl, sid)
+				encodeWindowPayloads(r, depth, anchor, distance, inherited, witness, isCheckpoint, ttl, sid)
 			})
 			continue
 		}
-		we, ww := referenceWindowPayloads(r, depth, anchor, distance, inherited, ha, isCheckpoint, ttl, sid)
-		ge, gw := encodeWindowPayloads(r, depth, anchor, distance, inherited, ha, isCheckpoint, ttl, sid)
+		we, ww := referenceWindowPayloads(r, depth, anchor, distance, inherited, witness, isCheckpoint, ttl, sid)
+		ge, gw := encodeWindowPayloads(r, depth, anchor, distance, inherited, witness, isCheckpoint, ttl, sid)
 		if !bytes.Equal(we, ge) || !bytes.Equal(ww, gw) {
 			t.Fatalf("case %d: emit %v wrapped %v differ", i, bytes.Equal(we, ge), bytes.Equal(ww, gw))
 		}

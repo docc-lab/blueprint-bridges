@@ -24,9 +24,9 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// CallGraphBridgeProcessor is the call-graph bridge (CG-Bridge): PB plus a hash array (HA) of
-// fan-out witnesses per window, which records where the call path branches, so reconstruction can
-// also place the siblings in a window. Export works exactly as for PB.
+// CallGraphBridgeProcessor is the call-graph bridge (CG-Bridge): PB plus at most one fan-out witness
+// per truss, which records where the call path branched, so reconstruction can also place the
+// siblings in a window (see newFanoutWitness). Export works exactly as for PB.
 type CallGraphBridgeProcessor struct {
 	mu sync.RWMutex
 
@@ -393,27 +393,30 @@ func (p *CallGraphBridgeProcessor) OnStart(parent context.Context, s sdktrace.Re
 // onStartFixed is OnStart in the legacy fixed-distance mode. It is a separate function so that
 // OnStart's stack frame stays small in range mode.
 func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktrace.ReadWriteSpan) {
-	// The parent's `_br` is varint(depth) || ckpt(8) || bloom || HA; the bloom has a fixed width.
+	// The parent's `_br` is varint(depth) || ckpt(8) || bloom || witness; the bloom has a fixed width.
 	bloomLen := int((BloomFilterM + 7) / 8)
 	var (
 		hasParent        bool
 		parentDepth      int
 		parentCkpt       [8]byte
 		parentBloomBytes []byte
-		parentHA         []byte
+		parentWitness    []byte
 	)
 	if baggage := backend.GetBaggageFromContext(parent); baggage != nil {
 		if br, ok := baggage[BaggageBRKey]; ok && br != "" {
 			if raw, okB := decodeBR(br); okB {
-				if d, c4, bb, hb, okU := unpackCGPRBBR(raw, bloomLen); okU {
+				if d, c4, bb, wb, okU := unpackCGPRBBR(raw, bloomLen); okU {
 					hasParent = true
 					parentDepth = d
 					parentCkpt = c4
 					parentBloomBytes = bb
-					parentHA = hb
+					parentWitness = wb
 				}
 			}
 		}
+	}
+	if len(parentWitness) != 0 {
+		checkParentWitness(parentWitness, parentDepth)
 	}
 
 	cpd := int(p.checkpointDistance)
@@ -434,16 +437,14 @@ func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktra
 		bf = bloom.New(BloomFilterM, BloomFilterK)
 	}
 
-	// The HA records each branching parent once: the first child to start inherits the parent's HA,
-	// the second starts a new one with a single entry (parent span ID, depth), and later children
-	// carry none. seqNum is the child's ordinal, set by the instrumentation.
+	// The fan-out witness: the second child gets a new one, the first inherits the parent's, later
+	// children get none. seqNum is the child's ordinal, set by the instrumentation.
 	seqNum, _ := parent.Value("seqNum").(int)
-	var ha []byte
+	var witness []byte
 	if hasParent && seqNum == 1 {
-		ha = append([]byte(nil), parentHA...)
+		witness = append([]byte(nil), parentWitness...)
 	} else if hasParent && seqNum == 2 {
-		parentSpanID := trace.SpanFromContext(parent).SpanContext().SpanID().String()
-		ha = haAppendEntry(nil, parentSpanID, depth)
+		witness = newFanoutWitness(trace.SpanFromContext(parent).SpanContext().SpanID(), depth)
 	}
 
 	isCheckpoint := depth%cpd == 0
@@ -453,27 +454,27 @@ func (p *CallGraphBridgeProcessor) onStartFixed(parent context.Context, s sdktra
 	var ownCkpt [8]byte
 	copy(ownCkpt[:], sid8[:])
 
-	// Checkpoints and leaves export the inherited window and its HA.
-	emitPayload := packCGPRBBR(depth, inheritedCkpt, bf.Bytes(), ha)
+	// Checkpoints and leaves export the inherited window and their witness.
+	emitPayload := packCGPRBBR(depth, inheritedCkpt, bf.Bytes(), witness)
 
 	// What the children inherit. A checkpoint anchors a new window on itself, with an empty filter
-	// and HA; any other span adds itself to the filter and passes the HA on.
+	// and no witness; any other span adds itself to the filter and passes its witness on.
 	priority := 0
 	var propCkpt [8]byte
 	var propBloomBytes []byte
-	propHA := ha
+	propWitness := witness
 	if isCheckpoint {
 		priority = 1
 		propCkpt = ownCkpt
 		propBloomBytes = bloom.New(BloomFilterM, BloomFilterK).Bytes()
-		propHA = nil
+		propWitness = nil
 	} else {
 		propCkpt = inheritedCkpt
 		// Span IDs are random, so they serve as the filter's hash input directly.
 		bf.AddPrehashed(sid8[:])
 		propBloomBytes = bf.Bytes()
 	}
-	propagationPacked := packCGPRBBR(depth, propCkpt, propBloomBytes, propHA)
+	propagationPacked := packCGPRBBR(depth, propCkpt, propBloomBytes, propWitness)
 
 	s.SetAttributes(
 		attribute.Int(AttrBagPrio, priority),

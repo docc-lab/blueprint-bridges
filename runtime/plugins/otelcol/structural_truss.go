@@ -12,13 +12,13 @@ import (
 //
 //	varint(absolute depth) || checkpoint(8) || byte(window distance - 1)
 //	|| bloom[geometry(distance)]                       # window core: the ancestors' filter
-//	|| varint(len HA) || HA                            # window core: fan-out entries
+//	|| varint(len witness) || witness                  # window core: fan-out witness, if any
 //	|| varint(n) || n * ( varint(ordinal) || endGroup(bound = ordinal-1) )
 //	|| varint(m) || m * ( trace_id(16) || parent(8) || varint(k) || endGroup(bound = k) )
 //
 // The first four fields match the PB/CGPB range-mode core byte for byte, so
-// unpackCheckpointWindowBR reads them unchanged. The HA is length-prefixed here (CGPB leaves it as
-// the remainder) so the tail can follow it.
+// unpackCheckpointWindowBR reads them unchanged. The witness is length-prefixed here (CGPB leaves it
+// as the remainder) so the tail can follow it.
 //
 // Ordinals: one start ordinal per span in the window, in path order, ending with the span that
 // carries the payload. Entry i's end group lists the siblings that had ended before span i
@@ -361,20 +361,20 @@ func unpackStructuralTail(buf []byte) (tail structuralTail, ok bool) {
 }
 
 // packStructuralBR packs the complete S-Bridge payload described above.
-func packStructuralBR(depth int, ckpt [8]byte, distance int, bloomBytes, ha []byte, tail structuralTail) []byte {
-	out := make([]byte, 0, varintLen(depth)+9+len(bloomBytes)+varintLen(len(ha))+len(ha)+8*(len(tail.ordinals)+1)+40*len(tail.delayed))
+func packStructuralBR(depth int, ckpt [8]byte, distance int, bloomBytes, witness []byte, tail structuralTail) []byte {
+	out := make([]byte, 0, varintLen(depth)+9+len(bloomBytes)+varintLen(len(witness))+len(witness)+8*(len(tail.ordinals)+1)+40*len(tail.delayed))
 	out = binary.AppendUvarint(out, uint64(maxInt(depth, 0)))
 	out = append(out, ckpt[:]...)
 	out = append(out, byte(distance-1))
 	out = append(out, bloomBytes...)
-	out = binary.AppendUvarint(out, uint64(len(ha)))
-	out = append(out, ha...)
+	out = binary.AppendUvarint(out, uint64(len(witness)))
+	out = append(out, witness...)
 	return packStructuralTail(out, tail)
 }
 
-// unpackStructuralBR reverses packStructuralBR. bloomBytes and ha are
+// unpackStructuralBR reverses packStructuralBR. bloomBytes and witness are
 // sub-slices of raw; the tail is copied out.
-func unpackStructuralBR(raw []byte) (depth int, ckpt [8]byte, distance int, bloomBytes, ha []byte, tail structuralTail, ok bool) {
+func unpackStructuralBR(raw []byte) (depth int, ckpt [8]byte, distance int, bloomBytes, witness []byte, tail structuralTail, ok bool) {
 	d, n := binary.Uvarint(raw)
 	if n <= 0 || d > uint64(^uint(0)>>1) || len(raw)-n < 9 {
 		return
@@ -387,17 +387,17 @@ func unpackStructuralBR(raw []byte) (depth int, ckpt [8]byte, distance int, bloo
 		return 0, ckpt, 0, nil, nil, tail, false
 	}
 	bloomBytes, rest = rest[:geometry.bytes], rest[geometry.bytes:]
-	haLen, read := binary.Uvarint(rest)
-	if read <= 0 || haLen > uint64(len(rest)-read) {
+	witnessLen, read := binary.Uvarint(rest)
+	if read <= 0 || witnessLen > uint64(len(rest)-read) {
 		return 0, ckpt, 0, nil, nil, tail, false
 	}
 	rest = rest[read:]
-	ha, rest = rest[:haLen], rest[haLen:]
+	witness, rest = rest[:witnessLen], rest[witnessLen:]
 	tail, ok = unpackStructuralTail(rest)
 	if !ok {
 		return 0, ckpt, 0, nil, nil, structuralTail{}, false
 	}
-	return int(d), ckpt, distance, bloomBytes, ha, tail, true
+	return int(d), ckpt, distance, bloomBytes, witness, tail, true
 }
 
 // A child's tail is its parent's tail plus one entry, so the inherited part is copied as bytes
@@ -506,8 +506,8 @@ func scanStructuralTail(buf []byte) (tail rawStructuralTail, ok bool) {
 }
 
 // scanStructuralBR is unpackStructuralBR with the tail left packed (rawStructuralTail); bloomBytes,
-// ha and the tail's bytes are sub-slices of raw.
-func scanStructuralBR(raw []byte) (depth int, ckpt [8]byte, distance int, bloomBytes, ha []byte, tail rawStructuralTail, ok bool) {
+// witness and the tail's bytes are sub-slices of raw.
+func scanStructuralBR(raw []byte) (depth int, ckpt [8]byte, distance int, bloomBytes, witness []byte, tail rawStructuralTail, ok bool) {
 	d, n := binary.Uvarint(raw)
 	if n <= 0 || d > uint64(^uint(0)>>1) || len(raw)-n < 9 {
 		return
@@ -520,27 +520,27 @@ func scanStructuralBR(raw []byte) (depth int, ckpt [8]byte, distance int, bloomB
 		return 0, ckpt, 0, nil, nil, tail, false
 	}
 	bloomBytes, rest = rest[:geometry.bytes], rest[geometry.bytes:]
-	haLen, read := binary.Uvarint(rest)
-	if read <= 0 || haLen > uint64(len(rest)-read) {
+	witnessLen, read := binary.Uvarint(rest)
+	if read <= 0 || witnessLen > uint64(len(rest)-read) {
 		return 0, ckpt, 0, nil, nil, tail, false
 	}
 	rest = rest[read:]
-	ha, rest = rest[:haLen], rest[haLen:]
+	witness, rest = rest[:witnessLen], rest[witnessLen:]
 	if tail, ok = scanStructuralTail(rest); !ok {
 		return 0, ckpt, 0, nil, nil, rawStructuralTail{}, false
 	}
-	return int(d), ckpt, distance, bloomBytes, ha, tail, true
+	return int(d), ckpt, distance, bloomBytes, witness, tail, true
 }
 
 // appendStructuralHeader writes the payload's window core: what packStructuralBR writes before the
 // tail.
-func appendStructuralHeader(out []byte, depth int, ckpt [8]byte, distance int, bloomBytes, ha []byte) []byte {
+func appendStructuralHeader(out []byte, depth int, ckpt [8]byte, distance int, bloomBytes, witness []byte) []byte {
 	out = binary.AppendUvarint(out, uint64(maxInt(depth, 0)))
 	out = append(out, ckpt[:]...)
 	out = append(out, byte(distance-1))
 	out = append(out, bloomBytes...)
-	out = binary.AppendUvarint(out, uint64(len(ha)))
-	return append(out, ha...)
+	out = binary.AppendUvarint(out, uint64(len(witness)))
+	return append(out, witness...)
 }
 
 // appendChildTail writes a child's tail: its parent's entries, its own (ordinal, end group), its

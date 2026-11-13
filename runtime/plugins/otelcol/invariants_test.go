@@ -65,13 +65,13 @@ func TestInvariantParentWindow(t *testing.T) {
 	}
 }
 
-func TestInvariantPBWindowHasNoHA(t *testing.T) {
+func TestInvariantPBWindowHasNoWitness(t *testing.T) {
 	t.Setenv("REVERSE_TRUSS", "off")
 	tp, _ := ttlTestProvider(t, "pb", checkpointRange{2, 6})
 	tr := tp.Tracer("inv")
 	_, root := tr.Start(context.Background(), "root", trace.WithSpanKind(trace.SpanKindServer))
-	withHA := baggageBR(root) + string(make([]byte, 9)) // a CGPB-style HA entry after the Bloom
-	mustBreakInvariant(t, "PB window with HA", func() { tr.Start(childOf(root, withHA, 1), "bad") })
+	withWitness := baggageBR(root) + string(newFanoutWitness(root.SpanContext().SpanID(), 1)) // CGPB's, after the Bloom
+	mustBreakInvariant(t, "PB window with a fan-out witness", func() { tr.Start(childOf(root, withWitness, 1), "bad") })
 	root.End()
 }
 

@@ -422,7 +422,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Fanout ordinal: the caller stamped this span's child ordinal in baggage
 	// ("__seq"). Set it on ctx BEFORE the server span starts so the bridge
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
-	// CGPB HA / SB ordinals are never emitted).
+	// fan-out witnesses and SB ordinals are never emitted).
 	if baggage != nil {
 		if sv, ok := baggage["__seq"]; ok {
 			if n, e := strconv.Atoi(sv); e == nil {
@@ -589,7 +589,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Fanout ordinal: the caller stamped this span's child ordinal in baggage
 	// ("__seq"). Set it on ctx BEFORE the server span starts so the bridge
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
-	// CGPB HA / SB ordinals are never emitted).
+	// fan-out witnesses and SB ordinals are never emitted).
 	if baggage != nil {
 		// A bridge caller always sends its child ordinal, an integer >= 1.
 		sv, ok := baggage["__seq"]
@@ -789,7 +789,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Fanout ordinal: the caller stamped this span's child ordinal in baggage
 	// ("__seq"). Set it on ctx BEFORE the server span starts so the bridge
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
-	// CGPB HA / SB ordinals are never emitted).
+	// fan-out witnesses and SB ordinals are never emitted).
 	if baggage != nil {
 		if sv, ok := baggage["__seq"]; ok {
 			n, e := strconv.Atoi(sv)
@@ -945,7 +945,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Fanout ordinal: the caller stamped this span's child ordinal in baggage
 	// ("__seq"). Set it on ctx BEFORE the server span starts so the bridge
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
-	// CGPB HA / SB ordinals are never emitted).
+	// fan-out witnesses and SB ordinals are never emitted).
 	if baggage != nil {
 		// A bridge caller always sends its child ordinal, an integer >= 1.
 		sv, ok := baggage["__seq"]
@@ -1109,7 +1109,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Fanout ordinal: the caller stamped this span's child ordinal in baggage
 	// ("__seq"). Set it on ctx BEFORE the server span starts so the bridge
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
-	// CGPB HA / SB ordinals are never emitted).
+	// fan-out witnesses and SB ordinals are never emitted).
 	if baggage != nil {
 		// A bridge caller always sends its child ordinal, an integer >= 1.
 		sv, ok := baggage["__seq"]

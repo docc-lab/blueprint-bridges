@@ -126,9 +126,8 @@ func TestScanAcceptsWhatUnpackAccepts(t *testing.T) {
 		distance := 1 + r.Intn(6)
 		bloomBytes := make([]byte, checkpointBlooms[distance-1].bytes)
 		r.Read(bloomBytes)
-		ha := make([]byte, r.Intn(30))
-		r.Read(ha)
-		payload := packStructuralBR(r.Intn(20), [8]byte{byte(i)}, distance, bloomBytes, ha, tail)
+		depth := r.Intn(20)
+		payload := packStructuralBR(depth, [8]byte{byte(i)}, distance, bloomBytes, randomWitness(r, depth), tail)
 		if i%2 == 1 { // corrupt it: truncate, or change a byte
 			if r.Intn(2) == 0 {
 				payload = payload[:r.Intn(len(payload))]
@@ -191,19 +190,19 @@ func TestChildTailMatchesRepack(t *testing.T) {
 func refStructuralWindow(p *StructuralBridgeProcessor, br string, seqNum int, ends []int, parentID trace.SpanID,
 	drained []structuralDelayed, sid trace.SpanID, isCheckpoint bool, outgoingTTL byte) (emit []byte, prop string, depth int) {
 	var (
-		hasParent   bool
-		parentTTL   byte
-		parentDepth int
-		anchor      [8]byte
-		distance    int
-		inherited   []byte
-		parentHA    []byte
-		tail        structuralTail
+		hasParent     bool
+		parentTTL     byte
+		parentDepth   int
+		anchor        [8]byte
+		distance      int
+		inherited     []byte
+		parentWitness []byte
+		tail          structuralTail
 	)
 	if raw, valid := parsePropBR(br); valid {
 		parentTTL, raw = p.checkpointRange.unwrap(raw)
 		var ok bool
-		parentDepth, anchor, distance, inherited, parentHA, tail, ok = unpackStructuralBR(raw)
+		parentDepth, anchor, distance, inherited, parentWitness, tail, ok = unpackStructuralBR(raw)
 		hasParent = ok && (!p.checkpointRange.enabled() || int(parentTTL) < distance)
 	}
 	cpd := int(p.checkpointDistance)
@@ -221,22 +220,22 @@ func refStructuralWindow(p *StructuralBridgeProcessor, br string, seqNum int, en
 		if p.checkpointRange.enabled() {
 			distance = int(outgoingTTL) + 1
 		}
-		inherited, parentHA, tail = nil, nil, structuralTail{}
+		inherited, parentWitness, tail = nil, nil, structuralTail{}
 	}
 	geometry := checkpointBlooms[distance-1]
 	filter := bloom.NewFromBytes(inherited, geometry.m, geometry.k)
-	var ha []byte
+	var witness []byte
 	if hasParent && seqNum == 1 {
-		ha = append([]byte(nil), parentHA...)
+		witness = append([]byte(nil), parentWitness...)
 	} else if hasParent && seqNum == 2 {
-		ha = haAppendEntry(nil, parentID.String(), depth)
+		witness = newFanoutWitness(parentID, depth)
 	}
 	emitTail := structuralTail{
 		ordinals:  append(append([]int(nil), tail.ordinals...), seqNum),
 		endEvents: append(append([][]int(nil), tail.endEvents...), ends),
 		delayed:   append(tail.delayed, drained...),
 	}
-	emit = packStructuralBR(depth, anchor, distance, filter.Bytes(), ha, emitTail)
+	emit = packStructuralBR(depth, anchor, distance, filter.Bytes(), witness, emitTail)
 	propTail := emitTail
 	if isCheckpoint {
 		anchor = [8]byte(sid)
@@ -245,12 +244,12 @@ func refStructuralWindow(p *StructuralBridgeProcessor, br string, seqNum int, en
 			geometry = checkpointBlooms[distance-1]
 		}
 		filter = bloom.New(geometry.m, geometry.k)
-		ha = nil
+		witness = nil
 		propTail = structuralTail{}
 	} else {
 		filter.AddPrehashed(sid[:])
 	}
-	propagation := packStructuralBR(depth, anchor, distance, filter.Bytes(), ha, propTail)
+	propagation := packStructuralBR(depth, anchor, distance, filter.Bytes(), witness, propTail)
 	return emit, propBR(p.checkpointRange.wrap(outgoingTTL, propagation)), depth
 }
 
@@ -277,9 +276,8 @@ func TestStructuralOnStartMatchesOld(t *testing.T) {
 					}
 					bloomBytes := make([]byte, checkpointBlooms[distance-1].bytes)
 					r.Read(bloomBytes)
-					ha := make([]byte, r.Intn(20))
-					r.Read(ha)
-					payload := packStructuralBR(r.Intn(15), [8]byte{byte(i), 1}, distance, bloomBytes, ha, randomTail(r))
+					depth := r.Intn(15)
+					payload := packStructuralBR(depth, [8]byte{byte(i), 1}, distance, bloomBytes, randomWitness(r, depth), randomTail(r))
 					br = propBR(mode.rng.wrap(byte(r.Intn(distance)), payload))
 				}
 				ctx = backend.SetBaggageInContext(ctx, map[string]string{BaggageBRKey: br})

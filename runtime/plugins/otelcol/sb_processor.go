@@ -417,7 +417,7 @@ func (p *StructuralBridgeProcessor) startAttributeBaggage() bool { return false 
 
 // OnStart implements [sdktrace.SpanProcessor].
 //
-// The structural bridge (SB) is the CGPB window (anchor, depth, Bloom filter, fan-out entries) plus
+// The structural bridge (SB) is the CGPB window (anchor, depth, Bloom filter, fan-out witness) plus
 // each span's start ordinal and its parent's end events, so reconstruction can also order
 // siblings. The wire layout is in structural_truss.go.
 //
@@ -437,7 +437,7 @@ type structuralInputs struct {
 	br       string       // the parent's outgoing `_br`, "" if none
 	seqNum   int          // start ordinal among its siblings
 	ends     []int        // siblings that had ended when it started, in end order (a copy)
-	parentID trace.SpanID // the parent, for the fan-out entry of the second child
+	parentID trace.SpanID // the parent, for the fan-out witness of the second child
 }
 
 // structuralInputsFrom reads the window's inputs from the parent's context.
@@ -476,23 +476,26 @@ func structuralInputsFrom(parent context.Context) (in structuralInputs) {
 // window core (the export payload has the filter from before this span was added).
 func (p *StructuralBridgeProcessor) startStructural(s sdktrace.ReadWriteSpan, in *structuralInputs) {
 	var (
-		hasParent   bool
-		parentTTL   byte
-		parentDepth int
-		anchor      [8]byte
-		distance    int
-		inherited   []byte
-		parentHA    []byte
-		tail        rawStructuralTail
+		hasParent     bool
+		parentTTL     byte
+		parentDepth   int
+		anchor        [8]byte
+		distance      int
+		inherited     []byte
+		parentWitness []byte
+		tail          rawStructuralTail
 	)
 	if raw := viewPropBR(in.br); raw != nil { // read-only
 		parentTTL, raw = p.checkpointRange.unwrap(raw)
 		var ok bool
-		parentDepth, anchor, distance, inherited, parentHA, tail, ok = scanStructuralBR(raw)
-		// The parent's `_br` was written by this bridge, so it must scan, and in range mode its TTL
-		// must be below its distance.
+		parentDepth, anchor, distance, inherited, parentWitness, tail, ok = scanStructuralBR(raw)
+		// The parent's `_br` was written by this bridge, so it must scan, it carries at most one
+		// fan-out witness, and in range mode its TTL must be below its distance.
 		if !ok {
 			brokenRule("the parent's `_br` scans as an S-Bridge window")
+		}
+		if len(parentWitness) != 0 {
+			checkParentWitness(parentWitness, parentDepth)
 		}
 		if p.checkpointRange.enabled() && int(parentTTL) >= distance {
 			brokenInt("a window's TTL is below its distance", "ttl", int(parentTTL), distance)
@@ -523,7 +526,7 @@ func (p *StructuralBridgeProcessor) startStructural(s sdktrace.ReadWriteSpan, in
 		if p.checkpointRange.enabled() {
 			distance = int(outgoingTTL) + 1
 		}
-		inherited, parentHA, tail = nil, nil, rawStructuralTail{}
+		inherited, parentWitness, tail = nil, nil, rawStructuralTail{}
 	}
 	if distance < 1 || distance > len(checkpointBlooms) {
 		brokenInt("a window's distance is 1..256", "distance", distance, len(checkpointBlooms))
@@ -534,13 +537,13 @@ func (p *StructuralBridgeProcessor) startStructural(s sdktrace.ReadWriteSpan, in
 	}
 	filter := bloom.NewFromBytes(inherited, geometry.m, geometry.k)
 
-	// Fan-out entries follow the CGPB rule: the first child inherits the parent's HA, the second
-	// records one (parent span ID, depth) entry, later children carry none.
-	var ha []byte
+	// The fan-out witness, as in CGPB: the second child gets a new one, the first inherits the
+	// parent's, later children get none.
+	var witness []byte
 	if hasParent && in.seqNum == 1 {
-		ha = append([]byte(nil), parentHA...)
+		witness = append([]byte(nil), parentWitness...)
 	} else if hasParent && in.seqNum == 2 {
-		ha = haAppendEntry(nil, in.parentID.String(), depth)
+		witness = newFanoutWitness(in.parentID, depth)
 	}
 
 	// Delayed end-event trusses left by earlier requests in this process ride on this span until a
@@ -558,9 +561,9 @@ func (p *StructuralBridgeProcessor) startStructural(s sdktrace.ReadWriteSpan, in
 
 	// Exported by checkpoints and leaves: the inherited window plus this span's ordinal and end-event
 	// group.
-	headerLen := varintLen(depth) + 9 + geometry.bytes + varintLen(len(ha)) + len(ha)
+	headerLen := varintLen(depth) + 9 + geometry.bytes + varintLen(len(witness)) + len(witness)
 	tailCap := 24 + len(tail.entries) + len(tail.delayed) + (in.seqNum+7)/8 + 4*len(in.ends) + 48*len(drained)
-	emit := appendStructuralHeader(make([]byte, 0, headerLen+tailCap), depth, anchor, distance, filter.Bytes(), ha)
+	emit := appendStructuralHeader(make([]byte, 0, headerLen+tailCap), depth, anchor, distance, filter.Bytes(), witness)
 	tailStart := len(emit)
 	emit = appendChildTail(emit, tail, in.seqNum, in.ends, drained)
 	childTail := emit[tailStart:]
@@ -581,10 +584,10 @@ func (p *StructuralBridgeProcessor) startStructural(s sdktrace.ReadWriteSpan, in
 		prop = append(prop, sid[:]...)
 		prop = append(prop, byte(distance-1))
 		prop = append(prop, make([]byte, geometry.bytes)...) // empty filter
-		prop = append(prop, 0, 0, 0)                         // no HA, no entries, no delayed entries
+		prop = append(prop, 0, 0, 0)                         // no witness, no entries, no delayed entries
 	} else {
 		filter.AddPrehashed(sid[:])
-		prop = appendStructuralHeader(prop, depth, anchor, distance, filter.Bytes(), ha)
+		prop = appendStructuralHeader(prop, depth, anchor, distance, filter.Bytes(), witness)
 		prop = append(prop, childTail...)
 	}
 

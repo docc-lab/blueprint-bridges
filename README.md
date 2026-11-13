@@ -46,13 +46,18 @@ before it, and costs more:
 | Bridge | `BRIDGE_KIND` | Preserves | Truss contents |
 |---|---|---|---|
 | Path bridge (P-Bridge) | `pb` | Connectivity: which fragments belong together, along which path | The last checkpoint, depth, and a Bloom filter of the ancestors since that checkpoint |
-| Call-graph bridge (CG-Bridge) | `cgpb` | The call graph, without the order of calls | P-Bridge, plus *fan-out witnesses* that record where the call path branches |
+| Call-graph bridge (CG-Bridge) | `cgpb` | The call graph, without the order of calls | P-Bridge, plus at most one *fan-out witness*: a span where the call path branched |
 | Structural bridge (S-Bridge) | `sb` | The call graph and the order of sibling calls, for critical-path analysis | CG-Bridge, plus the order in which siblings started and ended |
 
 Vanilla OpenTelemetry tracing (`v`) runs on the same export path and serves as the baseline.
 
 * **Vertical trusses** travel down the call path with requests. The S-Bridge also uses *orthogonal
   trusses*, which pass the order in which siblings ended on to later spans.
+* **Fan-out witnesses** (CG-Bridge and S-Bridge) record where a call path branches. When a span
+  starts its second child, that child's truss gets a witness: the span and the child's depth. The
+  witness then passes down through first children only. Later children start without one, a second
+  child further down replaces it with its own, and a checkpoint exports it and opens its window
+  without one. A truss carries at most one witness, and often none.
 * **Upward trusses** travel back up the call path in responses (`REVERSE_TRUSS=on`). Leaf services
   would otherwise have to checkpoint every truss that reaches them; instead, an ancestor checkpoints
   it. A policy picks the ancestor: a TTL, a fixed probability, or a probability that depends on

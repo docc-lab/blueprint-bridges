@@ -144,8 +144,7 @@ func TestStructuralPayloadRoundTrip(t *testing.T) {
 		g := checkpointBlooms[distance-1]
 		filter := bloom.New(g.m, g.k)
 		filter.AddPrehashed([]byte{1, 2, 3, 4, 5, 6, 7, 8})
-		ha := haAppendEntry(nil, "00000000000000aa", 4)
-		ha = haAppendEntry(ha, "00000000000000bb", 7)
+		witness := newFanoutWitness(trace.SpanID{7: 0xaa}, 4)
 		var tid [16]byte
 		tid[0], tid[15] = 9, 9
 		tail := structuralTail{
@@ -153,9 +152,9 @@ func TestStructuralPayloadRoundTrip(t *testing.T) {
 			endEvents: [][]int{nil, {2, 1}, nil, {1}},
 			delayed:   []structuralDelayed{{traceID: tid, parent: anchor, children: 5, ends: []int{4, 2, 1}}, {children: 1}},
 		}
-		packed := packStructuralBR(17, anchor, distance, filter.Bytes(), ha, tail)
-		depth, ckpt, dist, bb, ha2, tail2, ok := unpackStructuralBR(packed)
-		if !ok || depth != 17 || ckpt != anchor || dist != distance || !bytes.Equal(bb, filter.Bytes()) || !bytes.Equal(ha2, ha) {
+		packed := packStructuralBR(17, anchor, distance, filter.Bytes(), witness, tail)
+		depth, ckpt, dist, bb, w, tail2, ok := unpackStructuralBR(packed)
+		if !ok || depth != 17 || ckpt != anchor || dist != distance || !bytes.Equal(bb, filter.Bytes()) || !bytes.Equal(w, witness) {
 			t.Fatalf("distance %d: core corrupted (%v)", distance, ok)
 		}
 		if !reflect.DeepEqual(tail2.ordinals, tail.ordinals) || len(tail2.endEvents) != 4 ||
@@ -233,33 +232,32 @@ func TestStructuralBridgeFanOutTrusses(t *testing.T) {
 		if key == AttrBR {
 			raw = raw[1:] // forward TTL byte
 		}
-		depth, ckpt, distance, bb, ha, tail, ok := unpackStructuralBR(raw)
+		depth, ckpt, distance, bb, witness, tail, ok := unpackStructuralBR(raw)
 		if !ok {
 			t.Fatalf("%s does not decode", key)
 		}
-		return depth, ckpt, distance, bb, ha, tail
+		return depth, ckpt, distance, bb, witness, tail
 	}
-	// c1: first child inherits an empty HA and empty end events.
-	depth, ckpt, distance, _, ha, tail := decode(c1, AttrBREmit)
-	if depth != 1 || ckpt != [8]byte(root.SpanContext().SpanID()) || distance != 4 || len(ha) != 0 {
-		t.Fatalf("c1 core wrong: depth %d distance %d ha %d", depth, distance, len(ha))
+	// c1: first child inherits the root's lack of a witness, and empty end events.
+	depth, ckpt, distance, _, witness, tail := decode(c1, AttrBREmit)
+	if depth != 1 || ckpt != [8]byte(root.SpanContext().SpanID()) || distance != 4 || len(witness) != 0 {
+		t.Fatalf("c1 core wrong: depth %d distance %d witness %d bytes", depth, distance, len(witness))
 	}
 	if !reflect.DeepEqual(tail.ordinals, []int{1}) || len(tail.endEvents) != 1 || len(tail.endEvents[0]) != 0 {
 		t.Fatalf("c1 tail wrong: %+v", tail)
 	}
 	// c2: second child records the fan-out witness (root, depth 1).
-	_, _, _, _, ha, tail = decode(c2, AttrBREmit)
-	rootID := root.SpanContext().SpanID()
-	if len(ha) != 9 || !bytes.Equal(ha[:8], rootID[:]) || ha[8] != 1 {
-		t.Fatalf("c2 must witness the root fan-out: %x", ha)
+	_, _, _, _, witness, tail = decode(c2, AttrBREmit)
+	if !bytes.Equal(witness, newFanoutWitness(root.SpanContext().SpanID(), 1)) {
+		t.Fatalf("c2 must witness the root fan-out: %x", witness)
 	}
 	if !reflect.DeepEqual(tail.ordinals, []int{2}) {
 		t.Fatalf("c2 ordinal wrong: %+v", tail)
 	}
 	// c3: third child carries no witness, ordinal 3, and end event {2}.
-	_, _, _, _, ha, tail = decode(c3, AttrBREmit)
-	if len(ha) != 0 || !reflect.DeepEqual(tail.ordinals, []int{3}) || !reflect.DeepEqual(tail.endEvents[0], []int{2}) {
-		t.Fatalf("c3 tail wrong: ha %x %+v", ha, tail)
+	_, _, _, _, witness, tail = decode(c3, AttrBREmit)
+	if len(witness) != 0 || !reflect.DeepEqual(tail.ordinals, []int{3}) || !reflect.DeepEqual(tail.endEvents[0], []int{2}) {
+		t.Fatalf("c3 tail wrong: witness %x %+v", witness, tail)
 	}
 	// c3's propagation carries the same tail forward; its Bloom contains c3.
 	_, _, _, bb, _, prop := decode(c3, AttrBR)

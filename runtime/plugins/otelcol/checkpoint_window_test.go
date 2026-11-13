@@ -19,14 +19,14 @@ func TestCheckpointWindowCodec(t *testing.T) {
 		t.Run(fmt.Sprint(distance), func(t *testing.T) {
 			anchor := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
 			bits := bytes.Repeat([]byte{0x5a}, width)
-			ha := haAppendEntry(nil, "0102030405060708", 130)
-			packed := packCheckpointWindowBR(256, anchor, distance, bits, ha)
-			d, a, cpd, bb, hh, ok := unpackCheckpointWindowBR(packed)
-			if !ok || d != 256 || a != anchor || cpd != distance || !bytes.Equal(bb, bits) || !bytes.Equal(hh, ha) {
-				t.Fatal("window descriptor did not preserve variable Bloom/HA boundaries")
+			witness := newFanoutWitness(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 130)
+			packed := packCheckpointWindowBR(256, anchor, distance, bits, witness)
+			d, a, cpd, bb, w, ok := unpackCheckpointWindowBR(packed)
+			if !ok || d != 256 || a != anchor || cpd != distance || !bytes.Equal(bb, bits) || !bytes.Equal(w, witness) {
+				t.Fatal("window descriptor did not preserve variable Bloom/witness boundaries")
 			}
 			// A descriptor without its complete filter must not decode as a parent.
-			for n := 0; n < len(packed)-len(ha); n++ {
+			for n := 0; n < len(packed)-len(witness); n++ {
 				if _, _, _, _, _, ok := unpackCheckpointWindowBR(packed[:n]); ok {
 					t.Fatalf("accepted truncated window at byte %d", n)
 				}
@@ -50,11 +50,11 @@ func TestCheckpointWindowChangesGeometryAtCheckpoint(t *testing.T) {
 					filter.AddPrehashed(parentID[:])
 				}
 				anchor := [8]byte{255, 2}
-				var ha []byte
+				var witness []byte
 				if kind == "cgpb" {
-					ha = haAppendEntry(nil, "0102030405060708", 1)
+					witness = newFanoutWitness(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 1)
 				}
-				inbound := packCheckpointWindowBR(previousDistance-1, anchor, previousDistance, filter.Bytes(), ha)
+				inbound := packCheckpointWindowBR(previousDistance-1, anchor, previousDistance, filter.Bytes(), witness)
 				ctx := trace.ContextWithRemoteSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
 					TraceID: trace.TraceID{1}, SpanID: parentID, TraceFlags: trace.FlagsSampled,
 				}))
@@ -63,14 +63,14 @@ func TestCheckpointWindowChangesGeometryAtCheckpoint(t *testing.T) {
 				_, span := tp.Tracer("window").Start(ctx, "checkpoint", trace.WithSpanKind(trace.SpanKindServer))
 				span.SetAttributes(attribute.Bool("hasChildren", true))
 				emit, _ := decodeBR(checkpointSpanAttribute(span, AttrBREmit))
-				d, a, cpd, bb, hh, ok := unpackCheckpointWindowBR(emit)
-				if !ok || d != previousDistance || a != anchor || cpd != previousDistance || !bytes.Equal(bb, filter.Bytes()) || !bytes.Equal(hh, ha) {
+				d, a, cpd, bb, w, ok := unpackCheckpointWindowBR(emit)
+				if !ok || d != previousDistance || a != anchor || cpd != previousDistance || !bytes.Equal(bb, filter.Bytes()) || !bytes.Equal(w, witness) {
 					t.Fatal("new draw corrupted the completed incoming window")
 				}
 				outgoing, _ := decodeBR(checkpointSpanAttribute(span, AttrBR))
-				d, a, cpd, bb, hh, ok = unpackCheckpointWindowBR(outgoing[1:])
+				d, a, cpd, bb, w, ok = unpackCheckpointWindowBR(outgoing[1:])
 				nextM, _ := bloom.EstimateParameters(uint(maxInt(nextDistance-1, 1)), DefaultBloomFPRate)
-				if !ok || d != previousDistance || a != [8]byte(span.SpanContext().SpanID()) || cpd != nextDistance || int(outgoing[0])+1 != nextDistance || len(bb) != int((nextM+7)/8) || !bytes.Equal(bb, make([]byte, len(bb))) || len(hh) != 0 {
+				if !ok || d != previousDistance || a != [8]byte(span.SpanContext().SpanID()) || cpd != nextDistance || int(outgoing[0])+1 != nextDistance || len(bb) != int((nextM+7)/8) || !bytes.Equal(bb, make([]byte, len(bb))) || len(w) != 0 {
 					t.Fatal("new window was not reset and sized for its own draw")
 				}
 				if hp, lp := snapshot(); len(hp)+len(lp) != 0 {

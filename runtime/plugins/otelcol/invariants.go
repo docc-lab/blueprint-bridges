@@ -1,6 +1,10 @@
 package otelcol
 
-import "github.com/blueprint-uservices/blueprint/runtime/core/backend"
+import (
+	"encoding/binary"
+
+	"github.com/blueprint-uservices/blueprint/runtime/core/backend"
+)
 
 // Failure paths of the processors' invariant checks. A check is an inline comparison; when it
 // fails, one of these reports the rule and values through backend.InvariantBroken, which panics.
@@ -25,6 +29,24 @@ func brokenRule(rule string) {
 //go:noinline
 func brokenOrder(rule, what string, n, bound int64) {
 	backend.InvariantBroken(rule, what, "=", n, " bound=", bound)
+}
+
+// checkParentWitness checks the fan-out witness in a parent's truss, when it has one: exactly one
+// newFanoutWitness, recorded between the root and the parent.
+//
+//go:noinline
+func checkParentWitness(w []byte, parentDepth int) {
+	if len(w) <= 8 {
+		brokenInt("a fan-out witness is a span ID and a depth", "witness bytes", len(w), 9)
+	}
+	depth, n := binary.Uvarint(w[8:])
+	if n <= 0 || 8+n != len(w) {
+		brokenInt("a truss carries at most one fan-out witness", "witness bytes", len(w), 8+max(n, 1))
+	}
+	if depth < 1 || depth > uint64(parentDepth) {
+		brokenInt("a fan-out witness lies between the root and the span that carries it", "witness depth",
+			int(min(depth, uint64(parentDepth)+1)), parentDepth)
+	}
 }
 
 // checkExportCounts checks how a processor's span counters relate: a span is received, then

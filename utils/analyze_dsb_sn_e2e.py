@@ -78,14 +78,20 @@ def end_group(buf, offset, bound):
     return ends, offset
 
 
+def fanout_witnesses(witness):
+    """A truss carries at most one fan-out witness: span ID (8) || varint(depth)."""
+    if not witness:
+        return 0
+    assert len(witness) >= 9, 'truncated fan-out witness'
+    _, end = uvarint(witness, 8)
+    assert end == len(witness), 'more than one fan-out witness'
+    return 1
+
+
 def structural_tail(truss, offset):
-    ha_len, offset = uvarint(truss, offset)
-    ha, offset = truss[offset:offset + ha_len], offset + ha_len
-    witnesses, pos = 0, 0
-    while pos < len(ha):
-        assert len(ha) >= pos + 9, 'truncated fan-out witness'
-        _, pos = uvarint(ha, pos + 8)
-        witnesses += 1
+    witness_len, offset = uvarint(truss, offset)
+    witness, offset = truss[offset:offset + witness_len], offset + witness_len
+    witnesses = fanout_witnesses(witness)
     count, offset = uvarint(truss, offset)
     ordinals, groups = [], []
     for _ in range(count):
@@ -152,8 +158,10 @@ def inspect_traces(path, kind):
                     assert len(truss) >= pos + 9 + bloom_bytes, 'truncated window Bloom'
                     if kind == 'pb':
                         assert len(truss) == pos + 9 + bloom_bytes, 'PB Bloom differs from its intended CPD'
+                    if kind == 'cgpb':
+                        fanout_witnesses(truss[pos + 9 + bloom_bytes:])
                     if kind == 'sb':
-                        # Tomislav-RetCtx: CG core || varint(len HA) || HA || ordinals+end events || delayed.
+                        # CG core || varint(len witness) || witness || ordinals+end events || delayed.
                         tail = structural_tail(truss, pos + 9 + bloom_bytes)
                         assert 1 <= len(tail['ordinals']) <= distance, tail['ordinals']
                         counts['sb_end_events'] += sum(len(g) for g in tail['end_events'])

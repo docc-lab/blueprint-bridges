@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"unsafe"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 // encodeBR turns a packed `_br` payload into text for places that need valid UTF-8, such as OTLP
@@ -218,24 +220,23 @@ func unpackPathBridgeBR(buf []byte) (depth int, ckpt [8]byte, bloomBytes []byte,
 	return int(v), ckpt, rest[8:], true
 }
 
-// packCGPRBBR packs the CGPB payload in fixed-distance mode: the PB payload plus the window's hash
-// array (HA).
+// packCGPRBBR packs the CGPB payload in fixed-distance mode: the PB payload plus the truss's fan-out
+// witness, if it has one.
 //
-//	varint(absolute depth) || ckpt(8) || bloomBytes || haBytes
+//	varint(absolute depth) || ckpt(8) || bloomBytes || witness
 //
-// The filter has a fixed width, so the HA is whatever follows it. A checkpoint propagates an empty
-// HA. Entries are added with haAppendEntry.
-func packCGPRBBR(depth int, ckpt [8]byte, bloomBytes, haBytes []byte) []byte {
-	out := make([]byte, 0, varintLen(depth)+8+len(bloomBytes)+len(haBytes))
+// The filter has a fixed width, so the witness is whatever follows it.
+func packCGPRBBR(depth int, ckpt [8]byte, bloomBytes, witness []byte) []byte {
+	out := make([]byte, 0, varintLen(depth)+8+len(bloomBytes)+len(witness))
 	out = binary.AppendUvarint(out, uint64(maxInt(depth, 0)))
 	out = append(out, ckpt[:]...)
 	out = append(out, bloomBytes...)
-	out = append(out, haBytes...)
+	out = append(out, witness...)
 	return out
 }
 
 // unpackCGPRBBR reverses packCGPRBBR; bloomLen is the filter's width in bytes. The results alias buf.
-func unpackCGPRBBR(buf []byte, bloomLen int) (depth int, ckpt [8]byte, bloomBytes, haBytes []byte, ok bool) {
+func unpackCGPRBBR(buf []byte, bloomLen int) (depth int, ckpt [8]byte, bloomBytes, witness []byte, ok bool) {
 	v, n := binary.Uvarint(buf)
 	if n <= 0 {
 		return 0, ckpt, nil, nil, false
@@ -249,42 +250,17 @@ func unpackCGPRBBR(buf []byte, bloomLen int) (depth int, ckpt [8]byte, bloomByte
 	return int(v), ckpt, rest[:bloomLen], rest[bloomLen:], true
 }
 
-// packCGPBBR packs the CGPB baggage payload:
+// newFanoutWitness returns the fan-out witness a span's second child records: the span, which has
+// just fanned out, and the child's depth.
 //
-//	varint(depthMod) || bloomBytes || haBytes
-func packCGPBBR(depthMod int, bloomBytes, haBytes []byte) []byte {
-	out := make([]byte, 0, varintLen(depthMod)+len(bloomBytes)+len(haBytes))
-	out = binary.AppendUvarint(out, uint64(maxInt(depthMod, 0)))
-	out = append(out, bloomBytes...)
-	out = append(out, haBytes...)
-	return out
-}
-
-// unpackCGPBBR reverses packCGPBBR; bloomLen is the filter's width in bytes.
-func unpackCGPBBR(buf []byte, bloomLen int) (depthMod int, bloomBytes, haBytes []byte, ok bool) {
-	v, n := binary.Uvarint(buf)
-	if n <= 0 {
-		return 0, nil, nil, false
-	}
-	rest := buf[n:]
-	if len(rest) < bloomLen {
-		return 0, nil, nil, false
-	}
-	return int(v), rest[:bloomLen], rest[bloomLen:], true
-}
-
-// haAppendEntry appends a CGPB hash-array entry, parent span ID (8) || varint(depth), to a copy of
-// ha. parentSpanID is hex; ha is returned unchanged if it does not parse.
-func haAppendEntry(ha []byte, parentSpanID string, depthMod int) []byte {
-	pid, ok := spanIDHexTo8Bytes(parentSpanID)
-	if !ok {
-		return ha
-	}
-	out := make([]byte, 0, len(ha)+8+varintLen(depthMod))
-	out = append(out, ha...)
-	out = append(out, pid[:]...)
-	out = binary.AppendUvarint(out, uint64(maxInt(depthMod, 0)))
-	return out
+//	parent span ID (8) || varint(depth)
+//
+// A truss carries at most one witness. The second child of a span gets a new one; a first child
+// inherits its parent's, later children get none, and a checkpoint opens its window without one.
+func newFanoutWitness(parent trace.SpanID, depth int) []byte {
+	w := make([]byte, 8, 8+varintLen(depth))
+	copy(w, parent[:])
+	return binary.AppendUvarint(w, uint64(maxInt(depth, 0)))
 }
 
 // spanIDHexTo8Bytes parses a hex span ID. Short input is zero-padded on the left; long input keeps

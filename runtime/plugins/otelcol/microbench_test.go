@@ -8,7 +8,7 @@ package otelcol
 //
 //   PROCESSOR side (this file, "Processor*" benchmarks): the work the SpanBridge
 //   /PathBridge/CallGraphBridge processor does per span in OnStart — decode the
-//   inbound `_br` baggage, rebuild the window state (bloom / hash-array / ordinal
+//   inbound `_br` baggage, rebuild the window state (bloom / fan-out witness / ordinal
 //   chain), fold in this span, repack, and base64-encode the outbound payload.
 //   This is the marginal bridge work vs vanilla (vanilla's processor does none of
 //   it, so vanilla == 0 on this axis).
@@ -30,8 +30,8 @@ package otelcol
 // With the clock pinned at 2.4 GHz, cycles/op = ns/op * 2.4 exactly, so these
 // numbers convert directly into the same cycle units as the macro cycles/req.
 // -benchmem's allocs/op & B/op are first-class outputs: they are the direct
-// evidence for the allocation/GC story behind the post-knee cost (CGPB/SB
-// allocate the growing hash-array / ordinal chain; PB's bloom is fixed-width).
+// evidence for the allocation/GC story behind the post-knee cost (SB allocates
+// its growing ordinal chain; PB's bloom and CGPB's single witness are fixed-size).
 //
 // CAVEAT: these are warm-cache, single-goroutine, no-contention hot loops — a
 // LOWER BOUND on the deployed per-span cost (the macro ramp additionally pays
@@ -48,6 +48,7 @@ import (
 	"testing"
 
 	"github.com/blueprint-uservices/blueprint/runtime/plugins/bloom"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Package-level sinks defeat dead-code elimination (otherwise the compiler
@@ -91,7 +92,7 @@ func mbSelfID(i int) [8]byte {
 	return b
 }
 
-func mbSpanHex(i int) string { return fmt.Sprintf("%016x", 0x2000+i) }
+func mbParentID(i int) trace.SpanID { return trace.SpanID(mbSelfID(0x1000 + i)) }
 
 // bloomWith returns a window bloom holding n prehashed span IDs (raw 8-byte,
 // matching the processor's AddPrehashed(sid8[:]) fast path).
@@ -102,15 +103,6 @@ func mbBloomWith(n int) *bloom.BloomFilter {
 		bf.AddPrehashed(id[:])
 	}
 	return bf
-}
-
-// haWith builds a CGPB hash-array holding n entries (parent_span_id(8)||varint).
-func mbHAWith(n int) []byte {
-	var ha []byte
-	for i := 0; i < n; i++ {
-		ha = haAppendEntry(ha, mbSpanHex(i), i+1)
-	}
-	return ha
 }
 
 // mbTailWith builds an SB orthogonal tail holding n window positions, each
@@ -154,20 +146,21 @@ func BenchmarkProcessorOnStartCore(b *testing.B) {
 			}
 		})
 
-		// CGPB: PB work + haAppendEntry (the growing hash array)
+		// CGPB: PB work + a fan-out witness. The inbound truss carries one, and the span is a second
+		// child, so it replaces it with a new one: the costlier of the two cases.
 		b.Run(fmt.Sprintf("CGPB/cpd%d", cpd), func(b *testing.B) {
 			bloomLen := len(mbBloomWith(0).Bytes())
-			inbound := encodeBR(packCGPRBBR(depth-1, mbCkpt, mbBloomWith(maxInt(n-1, 0)).Bytes(), mbHAWith(maxInt(n-1, 0))))
-			psid := mbSpanHex(99)
+			inbound := encodeBR(packCGPRBBR(depth-1, mbCkpt, mbBloomWith(maxInt(n-1, 0)).Bytes(), newFanoutWitness(mbParentID(0), 1)))
+			parentID := mbParentID(99)
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				raw, _ := decodeBR(inbound)
-				d, ck, pbloom, ha, _ := unpackCGPRBBR(raw, bloomLen)
+				d, ck, pbloom, _, _ := unpackCGPRBBR(raw, bloomLen)
 				bf := bloom.NewFromBytes(pbloom, BloomFilterM, BloomFilterK)
 				bf.AddPrehashed(self[:])
-				ha2 := haAppendEntry(ha, psid, d+1)
-				mbSinkStr = encodeBR(packCGPRBBR(d+1, ck, bf.Bytes(), ha2))
+				witness := newFanoutWitness(parentID, d+1)
+				mbSinkStr = encodeBR(packCGPRBBR(d+1, ck, bf.Bytes(), witness))
 			}
 		})
 
@@ -178,13 +171,13 @@ func BenchmarkProcessorOnStartCore(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				raw, _ := decodeBR(inbound)
-				d, ck, _, pbloom, ha, tail, _ := unpackStructuralBR(raw)
+				d, ck, _, pbloom, witness, tail, _ := unpackStructuralBR(raw)
 				g := checkpointBlooms[cpd-1]
 				bf := bloom.NewFromBytes(pbloom, g.m, g.k)
 				bf.AddPrehashed(self[:])
 				tail.ordinals = append(tail.ordinals, 3)
 				tail.endEvents = append(tail.endEvents, []int{2, 1})
-				mbSinkStr = encodeBR(packStructuralBR(d+1, ck, cpd, bf.Bytes(), ha, tail))
+				mbSinkStr = encodeBR(packStructuralBR(d+1, ck, cpd, bf.Bytes(), witness, tail))
 			}
 		})
 	}
@@ -198,7 +191,7 @@ func BenchmarkProcessorPackOnly(b *testing.B) {
 		n := pbBloomCapacity(cpd)
 		depth := cpd * 3
 		pbBloom := mbBloomWith(n).Bytes()
-		ha := mbHAWith(maxInt(n-1, 0))
+		witness := newFanoutWitness(mbParentID(0), 1)
 		tail := mbTailWith(maxInt(n-1, 0))
 
 		b.Run(fmt.Sprintf("PB/cpd%d", cpd), func(b *testing.B) {
@@ -212,14 +205,14 @@ func BenchmarkProcessorPackOnly(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				mbSinkStr = encodeBR(packCGPRBBR(depth, mbCkpt, pbBloom, ha))
+				mbSinkStr = encodeBR(packCGPRBBR(depth, mbCkpt, pbBloom, witness))
 			}
 		})
 		b.Run(fmt.Sprintf("SB/cpd%d", cpd), func(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				mbSinkStr = encodeBR(packStructuralBR(depth, mbCkpt, cpd, pbBloom, ha, tail))
+				mbSinkStr = encodeBR(packStructuralBR(depth, mbCkpt, cpd, pbBloom, witness, tail))
 			}
 		})
 	}
@@ -263,13 +256,12 @@ func BenchmarkProcessorPrimitives(b *testing.B) {
 			mbSinkBytes, mbSinkBool = decodeBR(enc)
 		}
 	})
-	b.Run("haAppendEntry", func(b *testing.B) {
-		ha := mbHAWith(4)
-		pid := mbSpanHex(7)
+	b.Run("newFanoutWitness", func(b *testing.B) {
+		parentID := mbParentID(7)
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			mbSinkBytes = haAppendEntry(ha, pid, 3)
+			mbSinkBytes = newFanoutWitness(parentID, 3)
 		}
 	})
 }
@@ -460,18 +452,18 @@ func BenchmarkProcessorOnStartCoreParallel(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("CGPB/cpd%d", cpd), func(b *testing.B) {
 			bloomLen := len(mbBloomWith(0).Bytes())
-			inbound := encodeBR(packCGPRBBR(depth-1, mbCkpt, mbBloomWith(maxInt(n-1, 0)).Bytes(), mbHAWith(maxInt(n-1, 0))))
-			psid := mbSpanHex(99)
+			inbound := encodeBR(packCGPRBBR(depth-1, mbCkpt, mbBloomWith(maxInt(n-1, 0)).Bytes(), newFanoutWitness(mbParentID(0), 1)))
+			parentID := mbParentID(99)
 			b.ReportAllocs()
 			b.RunParallel(func(pb *testing.PB) {
 				var keep string
 				for pb.Next() {
 					raw, _ := decodeBR(inbound)
-					d, ck, pbloom, ha, _ := unpackCGPRBBR(raw, bloomLen)
+					d, ck, pbloom, _, _ := unpackCGPRBBR(raw, bloomLen)
 					bf := bloom.NewFromBytes(pbloom, m, k)
 					bf.AddPrehashed(self[:])
-					ha2 := haAppendEntry(ha, psid, d+1)
-					keep = encodeBR(packCGPRBBR(d+1, ck, bf.Bytes(), ha2))
+					witness := newFanoutWitness(parentID, d+1)
+					keep = encodeBR(packCGPRBBR(d+1, ck, bf.Bytes(), witness))
 				}
 				mbStoreStr(keep)
 			})
@@ -483,13 +475,13 @@ func BenchmarkProcessorOnStartCoreParallel(b *testing.B) {
 				var keep string
 				for pb.Next() {
 					raw, _ := decodeBR(inbound)
-					d, ck, _, pbloom, ha, tail, _ := unpackStructuralBR(raw)
+					d, ck, _, pbloom, witness, tail, _ := unpackStructuralBR(raw)
 					g := checkpointBlooms[cpd-1]
 					bf := bloom.NewFromBytes(pbloom, g.m, g.k)
 					bf.AddPrehashed(self[:])
 					tail.ordinals = append(tail.ordinals, 3)
 					tail.endEvents = append(tail.endEvents, []int{2, 1})
-					keep = encodeBR(packStructuralBR(d+1, ck, cpd, bf.Bytes(), ha, tail))
+					keep = encodeBR(packStructuralBR(d+1, ck, cpd, bf.Bytes(), witness, tail))
 				}
 				mbStoreStr(keep)
 			})
