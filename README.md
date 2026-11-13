@@ -73,8 +73,11 @@ OT_BRIDGE=sb go run main.go -w docker_sb_es_bd -o build
 ```
 
 [Interceptors and Middleware](docs/manual/interceptors.md) describes the instrumentation, its
-settings and how to write your own interceptors. [Running an application](docs/manual/running.md)
-covers deployment.
+settings and how to write your own interceptors.
+
+To run the benchmark applications on a Kubernetes cluster, first prepare the cluster with
+[Setting up a cluster](docs/manual/cluster_setup.md), then build and deploy with
+[Deploying the benchmark applications](docs/manual/deploying.md).
 
 ## Tests
 
