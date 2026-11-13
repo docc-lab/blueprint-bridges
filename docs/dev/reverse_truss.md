@@ -119,4 +119,4 @@ Collector CPD bounds supply the default reverse TTL range; `reverse_policy` and,
 for fixed probability, `reverse_probability` select the alternatives. Rebuilding
 the collector includes validation of the new keys. This revision is locally
 tested and not deployed; the earlier Social Network measurements used rejection
-disabled. See the [session change map](tomislav_retctx_changes.md).
+disabled.

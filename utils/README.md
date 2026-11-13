@@ -37,7 +37,6 @@ experiments ran on, and some contain its paths.
 | `analyze_*.py`, `plot_*.py`, `ramp_*.py` | Tables and figures from the run directories |
 | [`spanload/`](spanload/README.md) | OTLP load generator for collector-only experiments |
 | [`grpc_interceptors/`](grpc_interceptors/README.md) | Comparison of the interceptor and wrapper instrumentation |
-| [`analysis/`](analysis) | Results and figures of past campaigns |
 
 The options for random checkpoint distances and upward-truss routing are described in
 [Randomized checkpoint distance](../docs/dev/randomized_checkpoint_distance.md) and

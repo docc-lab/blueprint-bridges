@@ -286,7 +286,6 @@ applications' code and are not changed for tracing.
 | `utils/grpc_interceptors/` | the interceptor project's harness: build (`build_sn.sh`, `build_binaries.sh`), local runs in a private network namespace with a fake collector (`run_local.sh`, `fakecollector/`), trace comparison (`ab_trio.sh`, `compare_traces.py`, `attr_stats.py`), measurements (`tput_ab.sh`, `cpu_ab.sh`, `latency_ab.sh`, `profile_ab.sh`, `cpu_areas.py`, ...), and `README.md`: the plan, the test methods and the dated log of every step |
 | `utils/prepare_*.py`, `build_*`, `run_*`, `analyze_*`, `derive_*`, `dsb_apps.py`, `rt_env.sh`, `retctx_wire.py`, `reverse_policy.py`, `checkpoint_distance.py` | the cluster experiment pipeline: build and deploy the apps, set each service's tracing environment, run campaigns, analyse span loss and checkpoints (`test_*.py` are their tests) |
 | `utils/plot_*.py`, `ramp_*`, `*spanload*`, `burst_*`, `throughput_analysis.py` | load ramps, span-load experiments, figures |
-| `utils/analysis/` | campaign results, figures and their scripts (1,220 files) |
 | `utils/setup_environment.sh`, `install_blueprint_deps.sh`, `pin_nodes.py`, `pin-cpu-22ghz.sh`, `registry-*.yaml`, `k8s-configuration.md` | cluster setup |
 
 Running the Go tests of the tracing code (from `runtime/`):

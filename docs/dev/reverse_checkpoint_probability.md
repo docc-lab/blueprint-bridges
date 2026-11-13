@@ -112,5 +112,4 @@ deployment configuration, and 79-span concurrent trees across all policies.
 On September 13, 2026, SDK/backend/wrapper and collector-receiver race tests
 passed, along with all 13 deployment-option tests and shell syntax checks.
 This revision is tested locally; it has not been deployed or measured under load.
-See [SDK handoff and encoding](reverse_truss.md) and the
-[session change map](tomislav_retctx_changes.md).
+See [SDK handoff and encoding](reverse_truss.md).

@@ -16,3 +16,10 @@ __pycache__/
 
 # Editor settings
 .vscode/
+
+# Binaries and outputs of local builds and runs
+*.test
+/bridges
+/workload/main
+/workload/response_times_plot.png
+/*.log
