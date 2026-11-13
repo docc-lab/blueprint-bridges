@@ -23,7 +23,7 @@ type golangHttpServer struct {
 	InstanceName string
 	Bind         *address.BindConfig
 	Wrapped      golang.Service
-	// Tomislav-RetCtx: middleware installed on this server, outermost first (see AddServerMiddleware).
+	// Middleware installed on this server, outermost first (see AddServerMiddleware).
 	Middleware []ServerMiddleware
 
 	outputPackage string
@@ -102,7 +102,7 @@ func (node *golangHttpServer) AddInstantiation(builder golang.NamespaceBuilder) 
 				{Name: "ctx", Type: &gocode.UserType{Package: "context", Name: "Context"}},
 				{Name: "service", Type: iface},
 				{Name: "serverAddr", Type: &gocode.BasicType{Name: "string"}},
-				// Tomislav-RetCtx: one argument per installed middleware (none is fine).
+				// One argument per installed middleware (none is fine).
 				{Name: "middleware", Type: &gocode.Ellipsis{EllipsisOf: serverMiddlewareType}},
 			},
 		},

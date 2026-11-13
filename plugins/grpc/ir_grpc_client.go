@@ -24,9 +24,9 @@ type golangClient struct {
 
 	InstanceName string
 	ServerAddr   *address.Address[*golangServer]
-	// Tomislav-RetCtx: carry the validated wiring deadline into client generation.
+	// The validated call deadline from the wiring spec.
 	RequestTimeout string
-	// Tomislav-RetCtx: interceptors installed on this client, outermost first (see AddClientInterceptor).
+	// Interceptors installed on this client, outermost first (see AddClientInterceptor).
 	Interceptors []ClientInterceptor
 
 	outputPackage string
@@ -126,8 +126,8 @@ func (node *golangClient) AddInstantiation(builder golang.NamespaceBuilder) erro
 			Arguments: []gocode.Variable{
 				{Name: "ctx", Type: &gocode.UserType{Package: "context", Name: "Context"}},
 				{Name: "addr", Type: &gocode.BasicType{Name: "string"}},
-				// Tomislav-RetCtx: the timeout used to be variadic; it is always passed, so it is now a
-				// plain argument and the variadic slot holds one argument per installed interceptor.
+				// The timeout is a plain argument; the variadic slot holds one argument per installed
+				// interceptor.
 				{Name: "timeout", Type: &gocode.BasicType{Name: "string"}},
 				{Name: "interceptors", Type: &gocode.Ellipsis{EllipsisOf: unaryClientInterceptorType}},
 			},

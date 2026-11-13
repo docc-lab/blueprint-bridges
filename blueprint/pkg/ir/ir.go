@@ -46,7 +46,7 @@ func (v *IRValue) Name() string {
 	return v.String()
 }
 
-// Tomislav-RetCtx: quote topology/pattern literals safely in generated Go.
+// String quotes the value as a Go string literal, so any value is safe in generated code.
 func (v *IRValue) String() string {
 	return strconv.Quote(v.Value)
 }

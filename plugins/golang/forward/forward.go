@@ -1,5 +1,5 @@
 // Package forward breaks dependency cycles between services built in the same Golang namespace (a process, a test
-// harness): Tomislav-RetCtx.
+// harness).
 //
 // When service A's constructor needs B and B's constructor needs A, the wiring namespace detects that A is requested
 // while it is still being built (see wiring.ForwardReferencer) and gives B a forward Reference instead of A. In the

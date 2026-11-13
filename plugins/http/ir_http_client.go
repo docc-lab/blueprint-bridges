@@ -21,7 +21,7 @@ type GolangHttpClient struct {
 
 	InstanceName string
 	ServerAddr   *address.Address[*golangHttpServer]
-	// Tomislav-RetCtx: middleware installed on this client, outermost first (see AddClientMiddleware).
+	// Middleware installed on this client, outermost first (see AddClientMiddleware).
 	Middleware []ClientMiddleware
 
 	outputPackage string
@@ -101,7 +101,7 @@ func (node *GolangHttpClient) AddInstantiation(builder golang.NamespaceBuilder) 
 			Arguments: []gocode.Variable{
 				{Name: "ctx", Type: &gocode.UserType{Package: "context", Name: "Context"}},
 				{Name: "addr", Type: &gocode.BasicType{Name: "string"}},
-				// Tomislav-RetCtx: one argument per installed middleware (none is fine).
+				// One argument per installed middleware (none is fine).
 				{Name: "middleware", Type: &gocode.Ellipsis{EllipsisOf: clientMiddlewareType}},
 			},
 		},

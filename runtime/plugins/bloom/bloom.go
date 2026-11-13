@@ -32,8 +32,9 @@ func New(m uint64, k uint) *BloomFilter {
 // This is useful when you need to know m and k before deserializing, for example.
 // Returns the calculated m and k values.
 // Uses the standard Bloom filter formulas:
-//   m = - (n * ln(p)) / (ln(2)^2)
-//   k = (m / n) * ln(2)
+//
+//	m = - (n * ln(p)) / (ln(2)^2)
+//	k = (m / n) * ln(2)
 func EstimateParameters(n uint, p float64) (m uint64, k uint) {
 	if p <= 0 || p >= 1 {
 		// Invalid false positive rate, use default
@@ -66,8 +67,9 @@ func EstimateParameters(n uint, p float64) (m uint64, k uint) {
 // n is the expected number of elements, p is the desired false positive rate (0 < p < 1).
 // This calculates the optimal m (bit array size) and k (number of hash functions)
 // using the standard Bloom filter formulas:
-//   m = - (n * ln(p)) / (ln(2)^2)
-//   k = (m / n) * ln(2)
+//
+//	m = - (n * ln(p)) / (ln(2)^2)
+//	k = (m / n) * ln(2)
 func NewWithEstimates(n uint, p float64) *BloomFilter {
 	m, k := EstimateParameters(n, p)
 	return New(m, k)
@@ -123,7 +125,7 @@ func (bf *BloomFilter) AddPrehashed(data []byte) {
 
 // SetPrehashed sets data's k bits in a caller-owned bit array of m bits -- exactly what
 // NewFromBytes(bits).AddPrehashed(data) followed by Bytes() produces, without the filter
-// object or the copies. Tomislav-RetCtx.
+// object or the copies.
 func SetPrehashed(bits []byte, m uint64, k uint, data []byte) {
 	h1, h2 := splitHashes(data)
 	for i := uint(0); i < k; i++ {

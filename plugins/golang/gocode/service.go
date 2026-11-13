@@ -89,7 +89,7 @@ func (f *Func) AddRetVar(variable Variable) {
 	f.Returns = append(f.Returns, variable)
 }
 
-// Tomislav-RetCtx: ArgumentsForCall binds a signature to a call's argument count. A variadic
+// ArgumentsForCall binds a signature to a call's argument count. A variadic
 // parameter expands into individual element arguments with unique local names.
 // The original signature is unchanged, so constructors can be reused at
 // different arities in the same wiring spec.

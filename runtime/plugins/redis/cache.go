@@ -157,13 +157,13 @@ func (r *RedisCache) ZAddBatch(ctx context.Context, operations []struct {
 	return err
 }
 
-// Tomislav-RetCtx: ZRemRangeByRank removes the members of the sorted set at key whose rank (ascending score, zero-based,
+// ZRemRangeByRank removes the members of the sorted set at key whose rank (ascending score, zero-based,
 // inclusive; negative ranks count from the highest score) lies in [start, stop]: Redis ZREMRANGEBYRANK.
 func (r *RedisCache) ZRemRangeByRank(ctx context.Context, key string, start, stop int64) error {
 	return r.client.ZRemRangeByRank(ctx, key, start, stop).Err()
 }
 
-// Tomislav-RetCtx: ZAddBatchCapped is ZAddBatch followed, in the same pipeline (one network round trip), by one
+// ZAddBatchCapped is ZAddBatch followed, in the same pipeline (one network round trip), by one
 // ZREMRANGEBYRANK key 0 -(keep+1) per distinct key, so every sorted set it touches keeps only its `keep` highest-scored
 // members (a capped timeline). Sets with at most `keep` members are left unchanged by the trim.
 func (r *RedisCache) ZAddBatchCapped(ctx context.Context, operations []struct {
@@ -189,13 +189,13 @@ func (r *RedisCache) ZAddBatchCapped(ctx context.Context, operations []struct {
 	return err
 }
 
-// Tomislav-RetCtx: ZRange returns the members of the sorted set at key ranked start..stop in ascending score order
+// ZRange returns the members of the sorted set at key ranked start..stop in ascending score order
 // (Redis ZRANGE; stop -1 = the last member). Upstream DeathStarBench's social graph reads followers this way.
 func (r *RedisCache) ZRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
 	return r.client.ZRange(ctx, key, start, stop).Result()
 }
 
-// Tomislav-RetCtx: ZAddMembers adds every given member to the sorted set at key in ONE ZADD command (Redis ZADD key score
+// ZAddMembers adds every given member to the sorted set at key in ONE ZADD command (Redis ZADD key score
 // member [score member ...]). With no members Redis rejects the command, as it rejects upstream's empty-range zadd.
 func (r *RedisCache) ZAddMembers(ctx context.Context, key string, members []struct {
 	Score  float64
@@ -208,7 +208,7 @@ func (r *RedisCache) ZAddMembers(ctx context.Context, key string, members []stru
 	return r.client.ZAdd(ctx, key, zs...).Err()
 }
 
-// Tomislav-RetCtx: ZAddNXBatch is ZAddBatch with the NX flag on every ZADD (add only members not already present), in one
+// ZAddNXBatch is ZAddBatch with the NX flag on every ZADD (add only members not already present), in one
 // pipeline (one network round trip): upstream's pipe.zadd(..., UpdateType::NOT_EXIST).
 func (r *RedisCache) ZAddNXBatch(ctx context.Context, operations []struct {
 	Key    string
@@ -223,7 +223,7 @@ func (r *RedisCache) ZAddNXBatch(ctx context.Context, operations []struct {
 	return err
 }
 
-// Tomislav-RetCtx: ZRemBatch removes one member from each given sorted set (Redis ZREM), in one pipeline: upstream's
+// ZRemBatch removes one member from each given sorted set (Redis ZREM), in one pipeline: upstream's
 // pipe.zrem(...).zrem(...).
 func (r *RedisCache) ZRemBatch(ctx context.Context, operations []struct {
 	Key    string

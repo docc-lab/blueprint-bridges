@@ -52,7 +52,7 @@ type {{.Name}} struct {
 	ServerAddress string
 }
 
-// Tomislav-RetCtx: middleware wraps the client's transport, outermost first (may be empty).
+// Middleware wraps the client's transport, outermost first (may be empty).
 func New_{{.Name}}(ctx context.Context, serverAddress string, middleware ...httpmiddleware.ClientMiddleware) (*{{.Name}}, error) {
 	defaultRoundTripper := http.DefaultTransport
 	defaultTransportPointer, ok := defaultRoundTripper.(*http.Transport)
@@ -99,8 +99,7 @@ func (client *{{$receiver}}) {{SignatureWithRetVars $f}} {
 	}
 	encoded_url.RawQuery = vals.Encode()
 
-	// Tomislav-RetCtx: the request carries the caller's context values (for middleware), but not its
-	// cancellation, which the request did not have before either (it was sent with Client.Get).
+	// The request carries the caller's context values (for middleware), but not its cancellation.
 	http_request, err := http.NewRequestWithContext(context.WithoutCancel(ctx), "GET", encoded_url.String(), nil)
 	if err != nil {
 		return

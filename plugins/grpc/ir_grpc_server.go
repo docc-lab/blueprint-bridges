@@ -25,7 +25,7 @@ type golangServer struct {
 	InstanceName string
 	Bind         *address.BindConfig
 	Wrapped      golang.Service
-	// Tomislav-RetCtx: interceptors installed on this server, outermost first (see AddServerInterceptor).
+	// Interceptors installed on this server, outermost first (see AddServerInterceptor).
 	Interceptors []ServerInterceptor
 
 	outputPackage string
@@ -113,7 +113,7 @@ func (node *golangServer) AddInstantiation(builder golang.NamespaceBuilder) erro
 				{Name: "ctx", Type: &gocode.UserType{Package: "context", Name: "Context"}},
 				{Name: "service", Type: iface},
 				{Name: "serverAddr", Type: &gocode.BasicType{Name: "string"}},
-				// Tomislav-RetCtx: one argument per installed interceptor (none is fine).
+				// One argument per installed interceptor (none is fine).
 				{Name: "interceptors", Type: &gocode.Ellipsis{EllipsisOf: unaryServerInterceptorType}},
 			},
 		},

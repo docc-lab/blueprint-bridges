@@ -63,7 +63,7 @@ var strtype = &gocode.BasicType{Name: "string"}
 // configuration arguments.  This determination is made by looking at the argument types of the constructor
 // within the workflow spec (string arguments are treated as configuration; everything else is treated as
 // a service instance).
-// Tomislav-RetCtx: a variadic constructor parameter accepts zero or more trailing serviceArgs;
+// A variadic constructor parameter accepts zero or more trailing serviceArgs;
 // each becomes a separate dependency (or configuration value for ...string).
 //
 // After calling [Service], serviceName is an application-level golang service.  Application-level modifiers

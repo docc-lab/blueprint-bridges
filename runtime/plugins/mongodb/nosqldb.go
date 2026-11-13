@@ -131,7 +131,7 @@ func (mc *MongoCollection) FindMany(ctx context.Context, filter bson.D, projecti
 	return &MongoCursor{underlyingResult: cursor}, nil
 }
 
-// Tomislav-RetCtx: FindOneAndUpdate applies update to the first document matching filter and returns that document as
+// FindOneAndUpdate applies update to the first document matching filter and returns that document as
 // it is after the update (MongoDB findAndModify with new=true), inserting it when nothing matches and upsert is set. It is
 // the call upstream DeathStarBench's WriteUserTimeline makes (mongoc_collection_find_and_modify, upsert, new). The
 // returned document is handed back as raw BSON, undecoded (upstream keeps the reply as a bson_t and destroys it unread).
@@ -143,7 +143,7 @@ func (mc *MongoCollection) FindOneAndUpdate(ctx context.Context, filter bson.D, 
 	return raw, err
 }
 
-// Tomislav-RetCtx: CreateIndex creates an ascending single-field index on the collection (MongoDB createIndexes; a no-op
+// CreateIndex creates an ascending single-field index on the collection (MongoDB createIndexes; a no-op
 // when an identical index already exists). It is not part of backend.NoSQLCollection: workflows reach it through a
 // type assertion, as they reach the Redis sorted-set calls.
 func (mc *MongoCollection) CreateIndex(ctx context.Context, field string, unique bool) error {

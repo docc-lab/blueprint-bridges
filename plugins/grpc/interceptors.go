@@ -5,7 +5,7 @@ import (
 	"github.com/blueprint-uservices/blueprint/plugins/golang/gocode"
 )
 
-// Tomislav-RetCtx: gRPC interceptor support.
+// gRPC interceptor support.
 //
 // An interceptor is any IR node whose runtime instance is a standard grpc-go interceptor function.
 // The gRPC plugin does not care what the interceptor does (tracing, logging, ...); it only passes the
@@ -51,12 +51,12 @@ var (
 // [ServerInterceptor].
 type ServerInterceptorNode struct{}
 
-func (ServerInterceptorNode) InstanceType() gocode.TypeName     { return unaryServerInterceptorType }
+func (ServerInterceptorNode) InstanceType() gocode.TypeName    { return unaryServerInterceptorType }
 func (ServerInterceptorNode) ImplementsGRPCServerInterceptor() {}
 
 // Embed ClientInterceptorNode in an IR node to get the InstanceType and marker methods of
 // [ClientInterceptor].
 type ClientInterceptorNode struct{}
 
-func (ClientInterceptorNode) InstanceType() gocode.TypeName     { return unaryClientInterceptorType }
+func (ClientInterceptorNode) InstanceType() gocode.TypeName    { return unaryClientInterceptorType }
 func (ClientInterceptorNode) ImplementsGRPCClientInterceptor() {}

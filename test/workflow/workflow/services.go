@@ -134,7 +134,7 @@ func (l *TestLeafServiceImpl) privateNonServiceFunction() int64 {
 	return 7
 }
 
-// Tomislav-RetCtx: TestPingService and TestPongService depend on each other (a dependency cycle), for the cycle tests in
+// TestPingService and TestPongService depend on each other (a dependency cycle), for the cycle tests in
 // test/wiring/cycle_test.go.
 type (
 	TestPingService interface {

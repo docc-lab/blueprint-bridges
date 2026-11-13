@@ -142,7 +142,7 @@ type (
 		AddToWorkspace(WorkspaceBuilder) error
 	}
 
-	// Tomislav-RetCtx: a [Node] can implement TypedInstance to say what Go type its runtime instance has.
+	// A [Node] can implement TypedInstance to say what Go type its runtime instance has.
 	//
 	// When another node's constructor takes this node as an argument, the generated code fetches the
 	// instance into a local variable.  For services that variable gets the service's interface type; for

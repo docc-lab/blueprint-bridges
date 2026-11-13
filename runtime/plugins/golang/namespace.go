@@ -81,10 +81,9 @@ type Namespace struct {
 	name       string
 	buildFuncs map[string]BuildFunc
 	built      map[string]any
-	// AI_ADDED: Mutex to protect concurrent access to the built map
-	builtMu sync.RWMutex // Protects concurrent access to the built map
+	builtMu    sync.RWMutex // guards built
 
-	// Tomislav-RetCtx: names whose build function is running right now (see Building).
+	// Names whose build function is running right now (see Building).
 	building   map[string]int
 	buildingMu sync.Mutex
 
@@ -359,7 +358,6 @@ func (b *NamespaceBuilder) checkRequired(parent *Namespace) error {
 }
 
 // Reports whether the namespace has a definition for name
-// AI_ADDED: Added mutex protection for concurrent access
 func (n *Namespace) has(name string) bool {
 	n.builtMu.RLock()
 	_, isBuilt := n.built[name]
@@ -387,10 +385,7 @@ func (n *Namespace) has(name string) bool {
 	// return false
 }
 
-// Gets a node from this namespace.  If the node hasn't been built yet,
-// it will be built.
-// AI_ADDED: Added mutex protection with double-check pattern to prevent concurrent map writes
-// Tomislav-RetCtx: startBuilding records that the build function of `name` is starting, or fails if it is already
+// startBuilding records that the build function of `name` is starting, or fails if it is already
 // running: the request then comes from inside that build (a constructor on a dependency cycle called the other side
 // of the cycle, which needs this node), and building it again would recurse forever.
 func (n *Namespace) startBuilding(name string) error {
@@ -406,7 +401,7 @@ func (n *Namespace) startBuilding(name string) error {
 	return nil
 }
 
-// Tomislav-RetCtx: markBuilding counts a build function of `name` starting (+1) or finishing (-1).
+// markBuilding counts a build function of `name` starting (+1) or finishing (-1).
 func (n *Namespace) markBuilding(name string, delta int) {
 	n.buildingMu.Lock()
 	defer n.buildingMu.Unlock()
@@ -419,7 +414,7 @@ func (n *Namespace) markBuilding(name string, delta int) {
 	}
 }
 
-// Tomislav-RetCtx: Building reports whether the node `name` is being built right now. A forward reference (generated
+// Building reports whether the node `name` is being built right now. A forward reference (generated
 // by Blueprint where a dependency cycle was broken) checks this before it fetches its target: a call that reaches a
 // node still under construction must fail instead of starting a second build of it.
 func (n *Namespace) Building(name string) bool {
@@ -448,7 +443,7 @@ func (n *Namespace) Get(name string, receiver any) error {
 
 		// Build the node (without holding the lock to avoid blocking other goroutines)
 		n.builtMu.Unlock()
-		// Tomislav-RetCtx: a node requested while it is being built would be built a second time, recursively, forever
+		// A node requested while it is being built would be built a second time, recursively, forever
 		// (a constructor on a dependency cycle calling the other side of the cycle): fail instead.
 		if err := n.startBuilding(name); err != nil {
 			return err

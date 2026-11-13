@@ -77,7 +77,7 @@ func Deploy(spec wiring.WiringSpec, serviceName string) {
 	DeployWithTimeout(spec, serviceName, "1s")
 }
 
-// Tomislav-RetCtx: property under which interceptor node names are recorded on a service's gRPC
+// interceptorsProp is the property under which interceptor node names are recorded on a service's gRPC
 // server node (serviceName.grpc_server) and gRPC client node (serviceName.grpc_client).
 const interceptorsProp = "grpc.interceptors"
 
@@ -105,7 +105,7 @@ func AddClientInterceptor(spec wiring.WiringSpec, serviceName string, intercepto
 	spec.AddProperty(serviceName+".grpc_client", interceptorsProp, interceptorName)
 }
 
-// Tomislav-RetCtx: looks up the interceptor nodes recorded on nodeName (see [AddServerInterceptor] and
+// getInterceptors looks up the interceptor nodes recorded on nodeName (see [AddServerInterceptor] and
 // [AddClientInterceptor]).  T is [ServerInterceptor] or [ClientInterceptor].
 func getInterceptors[T ir.IRNode](namespace wiring.Namespace, nodeName string) ([]T, error) {
 	var names []string
@@ -123,9 +123,8 @@ func getInterceptors[T ir.IRNode](namespace wiring.Namespace, nodeName string) (
 	return interceptors, nil
 }
 
-// Tomislav-RetCtx: DeployWithTimeout makes deep topology deadlines configurable;
-// Deploy retains its existing one-second default. An earlier deadline in the
-// caller's context still takes precedence over the configured call timeout.
+// DeployWithTimeout is [Deploy] with a configurable per-call deadline for the generated client (Deploy
+// uses one second). An earlier deadline in the caller's context still takes precedence.
 func DeployWithTimeout(spec wiring.WiringSpec, serviceName, requestTimeout string) {
 	// The nodes that we are defining
 	grpcClient := serviceName + ".grpc_client"

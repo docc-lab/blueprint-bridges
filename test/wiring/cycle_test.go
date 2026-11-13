@@ -13,7 +13,7 @@ import (
 )
 
 /*
-Tomislav-RetCtx: dependency cycles between services. Within one process the namespace breaks the cycle with a forward
+Dependency cycles between services. Within one process the namespace breaks the cycle with a forward
 reference (plugins/golang/forward); across processes over RPC no forward reference is needed, because the server
 side behind an address is built lazily. Each test names the service that closes the cycle before it is defined.
 */

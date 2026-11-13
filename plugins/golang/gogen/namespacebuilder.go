@@ -160,7 +160,7 @@ var buildFuncTemplate = `func(n *golang.Namespace) (any, error) {
 
 // Implements [golang.NamespaceBuilder]
 func (namespace *NamespaceBuilderImpl) DeclareConstructor(name string, constructor *gocode.Constructor, args []ir.IRNode) error {
-	// Tomislav-RetCtx: bind variadic fanout dependencies separately per call.
+	// Bind variadic fanout dependencies separately per call.
 	boundArgs, err := constructor.ArgumentsForCall(len(args) + 1)
 	if err != nil {
 		argNames := []string{}
@@ -197,7 +197,7 @@ func (namespace *NamespaceBuilderImpl) DeclareConstructor(name string, construct
 		if argIface, err := golang.GetGoInterface(namespace.Module(), args[i]); err == nil {
 			arg.NodeType = &argIface.UserType
 		} else if typed, isTyped := args[i].(golang.TypedInstance); isTyped {
-			// Tomislav-RetCtx: not a service, but the node says what its instance is (e.g. a gRPC
+			// Not a service, but the node says what its instance is (e.g. a gRPC
 			// interceptor function), so fetch it into a variable of that type instead of a string.
 			arg.NodeType = typed.InstanceType()
 		}

@@ -52,7 +52,7 @@ package {{.Package.ShortName}}
 type {{.Name}} struct {
 	Service {{.Imports.NameOf .Service.UserType}}
 	Address string
-	// Tomislav-RetCtx: middleware around every method's handler, outermost first (may be empty).
+	// Middleware around every method's handler, outermost first (may be empty).
 	Middleware []httpmiddleware.ServerMiddleware
 }
 
@@ -64,7 +64,7 @@ func New_{{.Name}}(ctx context.Context, service {{.Imports.NameOf .Service.UserT
 	return handler, nil
 }
 
-// Tomislav-RetCtx: wrap puts the middleware around the handler of one method, outermost first.
+// wrap puts the middleware around the handler of one method, outermost first.
 func (handler *{{.Name}}) wrap(method string, h http.Handler) http.Handler {
 	for i := len(handler.Middleware) - 1; i >= 0; i-- {
 		h = handler.Middleware[i]("{{.Service.Name}}", method, h)
@@ -116,12 +116,12 @@ func (handler *{{$receiver}}) {{$f.Name -}}
 	}
 	{{- end}}
 	{{end}}
-	// Tomislav-RetCtx: the service gets the values middleware put on the request's context, but not
-	// its cancellation (it used to get context.Background(), so it runs on if the caller goes away).
+	// The service gets the values middleware put on the request's context, but not its cancellation:
+	// it runs to completion even if the caller goes away.
 	ctx := context.WithoutCancel(r.Context())
 	{{RetVars $f "err"}} {{HasNewReturnVars $f}} handler.Service.{{$f.Name}}({{ArgVars $f "ctx"}})
 	if err != nil {
-		httpmiddleware.RecordError(w, err) // Tomislav-RetCtx: the error itself, for middleware that wants it
+		httpmiddleware.RecordError(w, err) // the error itself, for middleware that wants it
 		http.Error(w, err.Error(), 500)
 		return
 	}

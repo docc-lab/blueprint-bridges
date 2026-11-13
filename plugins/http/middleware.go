@@ -8,7 +8,7 @@ import (
 	"github.com/blueprint-uservices/blueprint/plugins/golang/gocode"
 )
 
-// Tomislav-RetCtx: HTTP middleware support, the HTTP counterpart of the gRPC plugin's interceptors
+// HTTP middleware support, the HTTP counterpart of the gRPC plugin's interceptors
 // (plugins/grpc/interceptors.go).
 //
 // A middleware is any IR node whose runtime instance is an httpmiddleware.ServerMiddleware or

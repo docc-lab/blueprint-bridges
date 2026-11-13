@@ -58,7 +58,7 @@ func Deploy(spec wiring.WiringSpec, serviceName string) {
 		if err != nil {
 			return nil, blueprint.Errorf("HTTP client %s expected %s to be an address, but encountered %s", httpClient, clientNext, err)
 		}
-		middleware, err := getMiddleware[ClientMiddleware](ns, httpClient) // Tomislav-RetCtx: middleware.go
+		middleware, err := getMiddleware[ClientMiddleware](ns, httpClient)
 		if err != nil {
 			return nil, err
 		}
@@ -73,7 +73,7 @@ func Deploy(spec wiring.WiringSpec, serviceName string) {
 			return nil, blueprint.Errorf("HTTP server %s expected %s to be a golang.Service, but encountered %s", httpServer, serverNext, err)
 		}
 
-		middleware, err := getMiddleware[ServerMiddleware](ns, httpServer) // Tomislav-RetCtx: middleware.go
+		middleware, err := getMiddleware[ServerMiddleware](ns, httpServer)
 		if err != nil {
 			return nil, err
 		}

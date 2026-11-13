@@ -57,7 +57,7 @@ type {{.Name}} struct {
 	Unimplemented{{.Service.Name}}Server
 	Service {{.Imports.NameOf .Service.UserType}}
 	Address string
-	// Tomislav-RetCtx: unary interceptors installed on the server, outermost first (may be empty).
+	// Unary interceptors installed on the server, outermost first (may be empty).
 	Interceptors []grpc.UnaryServerInterceptor
 }
 
@@ -80,7 +80,7 @@ func (handler *{{.Name}}) Run(ctx context.Context) error {
 	if len(handler.Interceptors) > 0 {
 		opts = append(opts, grpc.ChainUnaryInterceptor(handler.Interceptors...))
 	}
-	// Tomislav-RetCtx: stream workers.  By default gRPC runs every incoming call on a new
+	// Stream workers.  By default gRPC runs every incoming call on a new
 	// goroutine.  A new goroutine starts with a small stack, and every time the call goes deeper
 	// than the stack allows (gRPC's receive path, interceptors, the service, its own calls), the
 	// runtime copies the whole stack to one twice the size, adjusting every frame on it.  Workers
@@ -89,9 +89,8 @@ func (handler *{{.Name}}) Run(ctx context.Context) error {
 	// calls get a reused stack, never how many run at once.
 	// GRPC_STREAM_WORKERS sets the number of workers; 0 turns them off (gRPC's default).  Unset,
 	// it is 32, or GOMAXPROCS if that is more (gRPC's own suggestion is GOMAXPROCS, but a handler
-	// waiting for its downstream calls holds its worker, so more calls are open than CPUs; on SN, 8
-	// and 32 workers saved the same, 2 less: utils/grpc_interceptors/README.md, "Stack growth").  A
-	// value that does not parse also turns them off.
+	// waiting for its downstream calls holds its worker, so more calls are open than CPUs).  A value
+	// that does not parse also turns them off.
 	workers := uint64(32)
 	if n := uint64(runtime.GOMAXPROCS(0)); n > workers {
 		workers = n

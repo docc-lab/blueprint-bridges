@@ -204,7 +204,7 @@ func (lib *gotests) AddEdge(name string, edge ir.IRNode) error {
 	return nil
 }
 
-// Tomislav-RetCtx: implements [wiring.ForwardReferencer]. Services built in the same Golang namespace may depend on each
+// ForwardReference implements [wiring.ForwardReferencer]. Services built in the same Golang namespace may depend on each
 // other in a cycle: the service that closes the cycle receives a forward reference (plugins/golang/forward) that
 // reaches its target at runtime, once the target is built.
 func (lib *gotests) ForwardReference(name string, resolve func() (ir.IRNode, error)) (ir.IRNode, error) {

@@ -174,7 +174,7 @@ func (mod *ParsedModule) Load() error {
 			return nil
 		}
 
-		// Tomislav-RetCtx: test-only constructors must not enter generated wiring.
+		// Test-only constructors must not enter generated wiring.
 		pkgs, err := parser.ParseDir(&fset, path, func(info os.FileInfo) bool {
 			return !strings.HasSuffix(info.Name(), "_test.go")
 		}, parser.ParseComments)

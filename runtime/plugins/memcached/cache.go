@@ -95,13 +95,13 @@ func (m *Memcached) Mset(ctx context.Context, keys []string, values []interface{
 	return nil
 }
 
-// Tomislav-RetCtx: PutRaw stores value byte for byte (memcached set, no JSON encoding), as upstream DeathStarBench's
+// PutRaw stores value byte for byte (memcached set, no JSON encoding), as upstream DeathStarBench's
 // memcached_set stores the JSON text it was given. Not part of backend.Cache: workflows reach it through a type assertion.
 func (m *Memcached) PutRaw(ctx context.Context, key string, value []byte) error {
 	return m.Client.Set(&memcache.Item{Key: key, Value: value})
 }
 
-// Tomislav-RetCtx: GetRaw returns the stored bytes as they are (memcached get); found is false on a miss.
+// GetRaw returns the stored bytes as they are (memcached get); found is false on a miss.
 func (m *Memcached) GetRaw(ctx context.Context, key string) ([]byte, bool, error) {
 	it, err := m.Client.Get(key)
 	if err == memcache.ErrCacheMiss {
@@ -113,7 +113,7 @@ func (m *Memcached) GetRaw(ctx context.Context, key string) ([]byte, bool, error
 	return it.Value, true, nil
 }
 
-// Tomislav-RetCtx: MgetRaw is one memcached multi-get; values[i] holds the bytes stored under keys[i], nil for a miss.
+// MgetRaw is one memcached multi-get; values[i] holds the bytes stored under keys[i], nil for a miss.
 func (m *Memcached) MgetRaw(ctx context.Context, keys []string) ([][]byte, error) {
 	items, err := m.Client.GetMulti(keys)
 	if err != nil {

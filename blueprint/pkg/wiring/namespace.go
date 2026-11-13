@@ -108,11 +108,11 @@ type namespaceimpl struct {
 
 	stack []*WiringDef // Used when building; the stack of wiring defs currently being built
 
-	// Tomislav-RetCtx: forward references handed out to break dependency cycles, by the name they stand for.
+	// Forward references handed out to break dependency cycles, by the name they stand for.
 	Forwards map[string]ir.IRNode
 }
 
-// Tomislav-RetCtx: ForwardReferencer is implemented by a [NamespaceHandler] that can break dependency cycles. When a
+// ForwardReferencer is implemented by a [NamespaceHandler] that can break dependency cycles. When a
 // node is requested while it is itself still being built (A's build asked for B and B's build asks for A),
 // ForwardReference returns a node to give the requester instead: one that stands for the node `name` and reaches it
 // at runtime, once it exists. resolve returns the node `name` and may only be called after the build completes (for
@@ -176,14 +176,14 @@ func (namespace *namespaceimpl) get(name string, addEdge bool, dst any) error {
 		return err
 	}
 
-	// Tomislav-RetCtx: a node requested while it is itself still being built closes a dependency cycle (A's build
+	// A node requested while it is itself still being built closes a dependency cycle (A's build
 	// asked for B, B's build now asks for A). Building it again would recurse forever, so the namespace hands out a
 	// forward reference instead, which stands for the node and reaches it once it is built.
 	if def.Name == name && namespace.isBuilding(def) {
 		return namespace.forwardReference(name, def, dst)
 	}
 
-	// Track the defs being built. Tomislav-RetCtx: an alias pushes no frame of its own: the aliased name pushes its
+	// Track the defs being built. An alias pushes no frame of its own: the aliased name pushes its
 	// definition itself, and a second frame for the same definition would look like a cycle.
 	if def.Name == name {
 		namespace.stack = append(namespace.stack, def)
@@ -254,7 +254,7 @@ func (namespace *namespaceimpl) get(name string, addEdge bool, dst any) error {
 	return copyResult(node, dst)
 }
 
-// Tomislav-RetCtx: isBuilding reports whether def is being built right now, i.e. is on the build stack.
+// isBuilding reports whether def is being built right now, i.e. is on the build stack.
 func (namespace *namespaceimpl) isBuilding(def *WiringDef) bool {
 	for _, building := range namespace.stack {
 		if building == def {
@@ -264,7 +264,7 @@ func (namespace *namespaceimpl) isBuilding(def *WiringDef) bool {
 	return false
 }
 
-// Tomislav-RetCtx: forwardReference breaks the dependency cycle that closes at `name` (see [ForwardReferencer]). One
+// forwardReference breaks the dependency cycle that closes at `name` (see [ForwardReferencer]). One
 // forward reference is made per name and passed to the handler like a built node, so it is generated with the rest
 // of the namespace; the node `name` itself is built and recorded as usual by the get call already in progress.
 func (namespace *namespaceimpl) forwardReference(name string, def *WiringDef, dst any) error {

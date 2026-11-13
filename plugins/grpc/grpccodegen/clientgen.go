@@ -56,7 +56,7 @@ type {{.Name}} struct {
 	Timeout time.Duration
 }
 
-// Tomislav-RetCtx: timeout is the per-call deadline from the wiring spec (empty means 1s).
+// timeout is the per-call deadline from the wiring spec (empty means 1s).
 // interceptors are unary client interceptors, outermost first (may be empty).
 func New_{{.Name}}(ctx context.Context, serverAddress string, timeout string, interceptors ...grpc.UnaryClientInterceptor) (*{{.Name}}, error) {
 	var opts []grpc.DialOption
