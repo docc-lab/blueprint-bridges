@@ -11,9 +11,9 @@ import (
 
 var errInvalidCheckpointRange = errors.New("invalid checkpoint distance range")
 
-// Tomislav-RetCtx: checkpointRange is immutable after collector config discovery.
-// A zero range preserves the legacy fixed-cpd protocol. An explicit range
-// enables a one-byte TTL prefix on propagation baggage (not exported trusses).
+// checkpointRange is the range from which checkpoint distances (cpd) are drawn, read once from the
+// collector's config. The zero range selects the legacy fixed-distance protocol; a set range adds
+// a one-byte TTL in front of the propagated `_br` (exported trusses carry no TTL).
 type checkpointRange struct {
 	min, max int
 }
@@ -64,9 +64,9 @@ func checkpointBound(value interface{}) (int, bool) {
 
 func (r checkpointRange) enabled() bool { return r.min > 0 }
 
-// next runs once per span, at OnStart. A checkpoint chooses one distance for
-// all its children; ordinary spans decrement their own copy of the parent TTL.
-// The decision is retained by the processor until checkpoint export at OnEnd.
+// next decides at OnStart whether a span is a checkpoint and what TTL it passes to its children.
+// A span whose parent's TTL has run out (or that has no parent) becomes a checkpoint and draws a new
+// distance for all its children; any other span passes on its parent's TTL minus one.
 func (r checkpointRange) next(parentTTL byte, hasParent bool) (checkpoint bool, outgoingTTL byte) {
 	if hasParent && parentTTL != 0 {
 		return false, parentTTL - 1
@@ -74,8 +74,7 @@ func (r checkpointRange) next(parentTTL byte, hasParent bool) (checkpoint bool, 
 	return true, r.newTTL()
 }
 
-// Tomislav-RetCtx: forward checkpoints and rejected leaves draw independently
-// from the same discovered range; neither countdown changes truss geometry.
+// newTTL draws a distance from the range. Checkpoints and rejected leaves draw independently.
 func (r checkpointRange) newTTL() byte {
 	return byte(r.min + rand.IntN(r.max-r.min+1) - 1)
 }
@@ -84,7 +83,7 @@ func (r checkpointRange) unwrap(raw []byte) (byte, []byte) {
 	if !r.enabled() {
 		return 0, raw
 	}
-	if len(raw) < 2 { // A TTL without a bridge payload is not a valid parent.
+	if len(raw) < 2 { // a TTL without a payload is not a valid parent
 		return 0, nil
 	}
 	return raw[0], raw[1:]

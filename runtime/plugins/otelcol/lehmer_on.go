@@ -2,8 +2,6 @@
 
 package otelcol
 
-// Tomislav-RetCtx: Lehmer-coded end-event groups are the default S-Bridge
-// encoding (paper §3.4). Build with `-tags sb_nolehmer` for the plain-list
-// ablation; the choice is fixed per binary so every service in a deployment
-// encodes and decodes the same way.
+// SB encodes end-event groups as Lehmer codes. Build with -tags sb_nolehmer for plain lists. The
+// choice is made per binary, so all services of a deployment must be built the same way.
 const lehmerEnabled = true

@@ -1,4 +1,3 @@
-// Package otelcol implements a tracer [backend.Tracer] client interface for the OpenTelemetry collector.
 package otelcol
 
 import (
@@ -18,15 +17,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// spanPadding holds a pre-allocated padding string sized by the
-// SPAN_PADDING_BYTES env var. Empty when unset / zero. Used by both
-// SB and vanilla processors' OnStart to artificially inflate per-span
-// wire size for tracing-pressure experiments — adds a `padding` string
-// attribute on every span. NOT prefixed with `__bag.` so it propagates
-// to the wire (forcing otelcol to allocate the bytes during decode).
-//
-// Computed once at package init from the env to avoid repeated env
-// reads and string allocations on the OnStart hot path.
+// spanPadding is an exported `padding` attribute of SPAN_PADDING_BYTES bytes that the vanilla and SB
+// processors add to every span, to inflate span size in experiments. Empty when unset.
 var spanPadding = func() string {
 	n, _ := strconv.Atoi(os.Getenv("SPAN_PADDING_BYTES"))
 	if n <= 0 {
@@ -35,10 +27,7 @@ var spanPadding = func() string {
 	return strings.Repeat("x", n)
 }()
 
-// grpcDeadline is the per-RPC context.WithTimeout applied around every
-// UploadTraces call. Used by both vanilla and SB processors. Configurable
-// via OTLP_DEADLINE_MS env var so deadline experiments don't require an
-// image rebuild — defaults to 1s, matching the SDK's original setting.
+// grpcDeadline is the timeout of each export RPC: OTLP_DEADLINE_MS, default 1 s.
 var grpcDeadline = func() time.Duration {
 	ms, _ := strconv.Atoi(os.Getenv("OTLP_DEADLINE_MS"))
 	if ms <= 0 {
@@ -47,88 +36,62 @@ var grpcDeadline = func() time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }()
 
-// grpcRetryEnabled controls whether the underlying otlptracegrpc client
-// will retry retriable errors (e.g. memlim's Unavailable refusal) with
-// exponential backoff. Default true matches the SDK's original behavior.
-// Set OTLP_RETRY=off to disable retry — useful for measurements where
-// retry interaction with the deadline confounds drop classification.
+// grpcRetryEnabled reflects OTLP_RETRY (anything but "off"). The OTLP exporter client's retry does
+// not exist on the direct export path; see sdk_retry.go for the retry the bridges use.
 var grpcRetryEnabled = os.Getenv("OTLP_RETRY") != "off"
 
-// Tunables for the export path. ExportInterval bounds the latency between
-// a span ending and its OTLP RPC; BatchSize bounds the per-RPC payload so
-// we don't crash into the default 4 MiB gRPC message ceiling on the
-// receiver side (one ResourceSpans-per-span at ~300–1000 B mean lets a
-// 15K-span tick exceed 4 MiB easily).
+// Export tuning. ExportInterval bounds the delay between a span ending and its export; BatchSize
+// keeps each export under the receiver's 4 MiB gRPC message limit.
 const (
 	ExportInterval = 100 * time.Millisecond
 	BatchSize      = 512
-	// MetricsInterval bounds how often the processor logs its counter
-	// snapshot to slog. 1s matches the ramp's per-step granularity so
-	// you can correlate counter deltas with rps steps in real time.
+	// MetricsInterval is how often the processors log their counters.
 	MetricsInterval = 1 * time.Second
 )
 
+// VanillaProcessor exports every span, with no bridge state. It is the baseline the bridges are
+// measured against and shares their export path.
 type VanillaProcessor struct {
 	mu sync.RWMutex
 
-	// Tomislav-RetCtx: the OTLP connection (otlp_wire.go); the export bytes are written here.
-	conn *otlpConn
-
-	// Configuration
+	conn          *otlpConn
 	agentEndpoint string
 
-	// Background processing
 	stopChan chan struct{}
 	wg       sync.WaitGroup
 
-	// Tracks in-flight per-batch export goroutines so Shutdown can wait for
-	// them to drain before closing the gRPC client.
+	// exportWG tracks in-flight exports, so Shutdown can wait for them before closing the connection.
 	exportWG sync.WaitGroup
 
-	// Counters for drop monitoring. All atomic so the metrics goroutine
-	// can read them concurrently with OnEnd / flushBuffer.
-	// Invariants:
-	//   spansReceived = OnEnd entries (input to processor)
-	//   spansFlushed  = spans drained from the buffer in flushBuffer ticks
-	//                 = spansSent + spansDropped (every flushed span
-	//                   either uploads successfully or is counted dropped)
-	//   batchesSent + batchesDropped = batches dispatched
-	// The send_* counters bucket dropped batches by gRPC status code so
-	// you can tell whether drops are deadline / unavailable / queue
-	// overflow / other.
+	// Counters, updated atomically. Every flushed span ends up sent or dropped:
+	// spansFlushed = spansSent + spansDropped. The send* counters split failed exports by gRPC code.
 	spansReceived   int64
 	spansFlushed    int64
 	spansSent       int64
 	batchesSent     int64
 	spansDropped    int64
 	batchesDropped  int64
-	sendDeadline    int64 // gRPC code = DeadlineExceeded
-	sendUnavailable int64 // gRPC code = Unavailable
-	sendExhausted   int64 // gRPC code = ResourceExhausted
-	sendCanceled    int64 // gRPC code = Canceled
-	sendOther       int64 // any other error class
+	sendDeadline    int64
+	sendUnavailable int64
+	sendExhausted   int64
+	sendCanceled    int64
+	sendOther       int64
 
-	// The encoded Resource of every export (otlp_wire.go, resourceField). A TracerProvider has
-	// exactly one Resource, so it is captured on the first OnEnd and every batch carries the same
-	// bytes once, not once per span.
+	// resource is the encoded Resource. A TracerProvider has one, so it is encoded on the first OnEnd
+	// and each batch carries it once.
 	resource     []byte
 	resourceOnce sync.Once
 
-	// Buffer of pending spans, each already encoded (otlp_wire.go, wireSpan) with its
-	// InstrumentationScope. flushBuffer groups by scope at export time to produce one
-	// ResourceSpans per chunk (shared Resource, one ScopeSpans per chunk).
+	// spanBuf holds ended spans, already encoded, until the next flush.
 	spanBuf  []wireSpan
 	spanLock sync.Mutex
 }
 
-// Darby: this gets run once per service (when initialized)
+// NewVanillaProcessor creates a processor that exports to the collector agent at agentEndpoint.
 func NewVanillaProcessor(ctx context.Context, agentEndpoint string, additionalPort string) (*VanillaProcessor, error) {
 	slog.Info("🔵 Creating new VanillaProcessor", "agentEndpoint", agentEndpoint)
 
-	// Tomislav-RetCtx: a plain gRPC connection; the processor writes the OTLP bytes itself
-	// (otlp_wire.go) instead of handing protobuf objects to the exporter client.  The exporter's
-	// retry (OTLP_RETRY) has no counterpart on this path: every campaign runs with it off, and the
-	// 1 s export deadline never left room for its 5 s first retry anyway.
+	// A plain gRPC connection: the processor encodes the OTLP request itself (otlp_wire.go).
 	conn, err := dialOTLP(agentEndpoint)
 	if err != nil {
 		slog.Error("❌ Failed to open the OTLP connection", "error", err)
@@ -146,21 +109,15 @@ func NewVanillaProcessor(ctx context.Context, agentEndpoint string, additionalPo
 		stopChan:      make(chan struct{}),
 	}
 
-	// Start background worker for batch export
 	processor.wg.Add(1)
 	go processor.processEvents()
-
-	// Start the metrics logger goroutine. Shares stopChan with
-	// processEvents — Shutdown closes once and both unwind.
 	processor.wg.Add(1)
 	go processor.logMetricsLoop()
 
 	return processor, nil
 }
 
-// logMetricsLoop emits one slog.Info line per MetricsInterval with the
-// full counter snapshot, until stopChan is closed. Picked up by anything
-// tailing kubectl logs.
+// logMetricsLoop logs the counters every MetricsInterval until stopChan is closed.
 func (p *VanillaProcessor) logMetricsLoop() {
 	defer p.wg.Done()
 	t := time.NewTicker(MetricsInterval)
@@ -175,9 +132,7 @@ func (p *VanillaProcessor) logMetricsLoop() {
 	}
 }
 
-// logMetrics emits one snapshot of every counter plus the current
-// in-memory buffer depth. Counters are loaded atomically; buffer depth
-// is a brief lock for an O(1) read.
+// logMetrics logs every counter and the number of buffered spans.
 func (p *VanillaProcessor) logMetrics() {
 	p.spanLock.Lock()
 	bufDepth := len(p.spanBuf)
@@ -196,13 +151,11 @@ func (p *VanillaProcessor) logMetrics() {
 		"send_other", atomic.LoadInt64(&p.sendOther),
 		"buffer_depth", bufDepth,
 	)
-	// Tomislav-RetCtx: SDK retry gauges on their own line (sdk_retry.go; parsed as BRIDGES_RETRY)
+	// The retry gauges go on a line of their own.
 	sdkRetry.logMetrics()
 }
 
-// categorizeSendError increments the appropriate per-code counter for a
-// failed UploadTraces. Uses status.Code which unwraps the gRPC status
-// out of fmt.Errorf %w wrappers.
+// categorizeSendError counts a failed export under its gRPC status code.
 func (p *VanillaProcessor) categorizeSendError(err error) {
 	switch status.Code(err) {
 	case codes.DeadlineExceeded:
@@ -218,10 +171,7 @@ func (p *VanillaProcessor) categorizeSendError(err error) {
 	}
 }
 
-// processEvents runs in the background to periodically drain the event
-// buffer and dispatch batches for export. Each ticker fire snapshots the
-// buffer once and spawns one goroutine per BatchSize-sized chunk; export
-// I/O is therefore fully off the OnEnd hot path and parallel across chunks.
+// processEvents flushes the buffer every ExportInterval, and once more when stopped.
 func (p *VanillaProcessor) processEvents() {
 	defer p.wg.Done()
 
@@ -231,8 +181,7 @@ func (p *VanillaProcessor) processEvents() {
 	for {
 		select {
 		case <-p.stopChan:
-			// Final drain: spawns chunk goroutines and returns; Shutdown
-			// waits on exportWG after wg.Wait().
+			// Shutdown waits for the exports this starts (exportWG).
 			p.flushBuffer()
 			return
 		case <-ticker.C:
@@ -241,16 +190,9 @@ func (p *VanillaProcessor) processEvents() {
 	}
 }
 
-// flushBuffer atomically swaps out the current span buffer, groups spans by
-// InstrumentationScope, chunks each scope group at BatchSize, and exports
-// each chunk in its own goroutine. Each chunk becomes a single
-// ResourceSpans wrapping a single ScopeSpans wrapping ≤BatchSize Spans —
-// so the shared Resource envelope is serialized exactly once per chunk
-// rather than once per span (~3× smaller wire payload than the
-// per-span-ResourceSpans shape it replaced). Chunking keeps every OTLP
-// RPC under the receiver-side 4 MiB gRPC limit regardless of arrival rate.
-// Tomislav-RetCtx: the chunk's request bytes are built by concatenating the spans' encoded bytes
-// (otlp_wire.go, buildBatch); nothing is marshalled at flush time.
+// flushBuffer takes the buffered spans and exports them in batches of at most BatchSize, each in its
+// own goroutine. A batch's request is the spans' encoded bytes concatenated under one Resource and
+// one scope per instrumentation scope (otlp_wire.go).
 func (p *VanillaProcessor) flushBuffer() {
 	p.spanLock.Lock()
 	snap := p.spanBuf
@@ -261,11 +203,8 @@ func (p *VanillaProcessor) flushBuffer() {
 		return
 	}
 
-	batches(p.resource, snap, BatchSize, func(batch *wireBatch) { // otlp_wire.go
-		// Count the chunk as flushed BEFORE we dispatch — at this point
-		// the spans have permanently left the buffer, so whatever
-		// happens to the upload they'll be accounted for under one of
-		// {sent, dropped}.
+	batches(p.resource, snap, BatchSize, func(batch *wireBatch) {
+		// Counted as flushed now; the export outcome adds it to sent or dropped.
 		atomic.AddInt64(&p.spansFlushed, batch.n)
 		p.exportWG.Add(1)
 		go func(batch *wireBatch) {
@@ -275,7 +214,7 @@ func (p *VanillaProcessor) flushBuffer() {
 				atomic.AddInt64(&p.batchesDropped, 1)
 				atomic.AddInt64(&p.spansDropped, batch.n)
 				p.categorizeSendError(err)
-				recordRefusedIDs(batch.traceIDs(), true) // Tomislav-RetCtx: every vanilla span is trace-critical
+				recordRefusedIDs(batch.traceIDs(), true) // every vanilla span is needed for its trace
 			}
 			sent := func() {
 				slog.Debug("Sent batch", "count", batch.n)
@@ -283,8 +222,7 @@ func (p *VanillaProcessor) flushBuffer() {
 				atomic.AddInt64(&p.spansSent, batch.n)
 			}
 			err := p.sendData(batch.req)
-			// Tomislav-RetCtx: vanilla's side of the SDK one-shot retry policy (sdk_retry.go):
-			// BRIDGES_RETRY=all retries every refused batch once; nothing is suppressed.
+			// With BRIDGES_RETRY=all a refused batch is retried once (sdk_retry.go).
 			if err != nil && sdkRetry.wants(true, err) {
 				p.exportWG.Add(1)
 				sdkRetry.scheduleBytes(int64(len(batch.req)), batch.n, func() error { return p.sendData(batch.req) }, func(err error) {
@@ -310,93 +248,70 @@ func (p *VanillaProcessor) flushBuffer() {
 
 // sendData sends one encoded batch to the OTLP endpoint.
 func (p *VanillaProcessor) sendData(req []byte) error {
-	// Create a context with timeout (env-tunable, default 1s).
 	ctx, cancel := context.WithTimeout(context.Background(), grpcDeadline)
 	defer cancel()
 
-	if err := p.conn.export(ctx, req); err != nil { // otlp_wire.go
+	if err := p.conn.export(ctx, req); err != nil {
 		slog.Error("❌ Failed to send data", "error", err)
 		return fmt.Errorf("failed to send data: %w", err)
 	}
 	return nil
 }
 
-// Tomislav-RetCtx: startAttributeBaggage tells NewOTCollectorTracer (trace.go) whether OnStart
-// adds "__bag." attributes.  Vanilla adds at most "padding".
+// startAttributeBaggage reports whether OnStart adds "__bag." attributes (see NewOTCollectorTracer).
 func (p *VanillaProcessor) startAttributeBaggage() bool { return false }
 
-// OnStart implements SpanProcessor.OnStart
+// OnStart implements [sdktrace.SpanProcessor].
 func (p *VanillaProcessor) OnStart(parent context.Context, s sdktrace.ReadWriteSpan) {
 	if spanPadding != "" {
-		// Artificial per-span byte inflation for tracing-pressure experiments.
-		// Goes on the wire (no __bag. prefix), so otelcol's decode path
-		// allocates the bytes. See spanPadding init.
 		s.SetAttributes(attribute.String("padding", spanPadding))
 	}
 }
 
-// OnEnd implements SpanProcessor.OnEnd
+// OnEnd implements [sdktrace.SpanProcessor].
 func (p *VanillaProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	atomic.AddInt64(&p.spansReceived, 1)
 
-	// Capture the (single, immutable) Resource on the first OnEnd. A
-	// TracerProvider has exactly one Resource for its lifetime, so this
-	// runs at most once.
 	p.resourceOnce.Do(func() {
-		p.resource = resourceField(s.Resource()) // otlp_wire.go
+		p.resource = resourceField(s.Resource())
 	})
 
 	p.routeToPipeline(s)
 }
 
-// routeToPipeline builds the mutable Span proto for s and appends it to
-// the buffer alongside its InstrumentationScope. The proto's Attributes /
-// Events slices stay mutable in the buffer so subsequent stages (e.g.
-// bridge processors that need to append breadcrumb attributes between
-// OnEnd and the next flush) can extend them in place.
+// routeToPipeline encodes s and buffers it for the next flush.
 func (p *VanillaProcessor) routeToPipeline(s sdktrace.ReadOnlySpan) {
-	// Tomislav-RetCtx: the span's OTLP bytes, written once here (otlp_wire.go).
 	entry := encodeSpan(s, s.Attributes(), nil, false, policyVanilla)
 	p.spanLock.Lock()
 	p.spanBuf = append(p.spanBuf, entry)
 	p.spanLock.Unlock()
 }
 
-// Shutdown implements SpanProcessor.Shutdown
+// Shutdown implements [sdktrace.SpanProcessor]. It flushes the buffer and waits for every export.
 func (p *VanillaProcessor) Shutdown(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	slog.Info("🔴 VanillaProcessor shutting down")
 
-	// Stop the ticker goroutine (which runs one final flushBuffer to drain
-	// the in-memory buffer into chunk goroutines tracked by exportWG).
-	close(p.stopChan)
+	close(p.stopChan) // processEvents flushes one last time
 	p.wg.Wait()
-
-	// Wait for all in-flight per-batch export goroutines to finish before
-	// closing the gRPC client — otherwise their UploadTraces calls would
-	// race the client.Stop and lose the final tail of spans.
 	p.exportWG.Wait()
 
-	// Stop the client
 	if err := p.conn.close(); err != nil {
 		slog.Error("❌ Failed to stop client", "error", err)
 	}
 
-	// Emit one final counter snapshot before returning so tail-end stats
-	// land in the logs even if the shutdown is the last thing the process
-	// does.
 	slog.Info("🔴 VanillaProcessor shutdown complete — final metrics:")
 	p.logMetrics()
 	return nil
 }
 
-// ForceFlush implements SpanProcessor.ForceFlush
+// ForceFlush implements [sdktrace.SpanProcessor]. It does nothing: spans are exported every
+// ExportInterval.
 func (p *VanillaProcessor) ForceFlush(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// No ForceFlush needed for OTLP client; nothing to do
 	return nil
 }

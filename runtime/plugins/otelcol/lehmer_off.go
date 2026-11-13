@@ -2,5 +2,5 @@
 
 package otelcol
 
-// Tomislav-RetCtx: ablation build; end-event groups are plain varint lists.
+// End-event groups are plain varint lists (see lehmer_on.go).
 const lehmerEnabled = false

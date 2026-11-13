@@ -7,15 +7,13 @@ import (
 	"unsafe"
 )
 
-// encodeBR wraps a packed _br payload as a base64-URL-no-pad string suitable
-// for W3C Baggage / OTLP StringValue transport. Inflates by ceil(4*N/3) with
-// no second-order percent-encoding (the URL-safe alphabet avoids `+`, `/`,
-// `=`, which some propagators silently re-encode).
+// encodeBR turns a packed `_br` payload into text for places that need valid UTF-8, such as OTLP
+// string attributes. It uses unpadded URL-safe base64, which propagators do not re-encode.
 func encodeBR(packed []byte) string {
 	return base64.RawURLEncoding.EncodeToString(packed)
 }
 
-// decodeBR reverses encodeBR. Returns nil/false on malformed input.
+// decodeBR reverses encodeBR. It returns false for empty or malformed input.
 func decodeBR(s string) ([]byte, bool) {
 	if s == "" {
 		return nil, false
@@ -27,23 +25,14 @@ func decodeBR(s string) ([]byte, bool) {
 	return b, true
 }
 
-// propBR is how the bridges that keep their state beside the span (ranged PB/CGPB windows,
-// checkpoint_window.go; SB, sb_processor.go) put their outgoing `_br` into the baggage: the raw
-// packed bytes in a Go string, which may hold any bytes.  Tomislav-RetCtx: it used to be encodeBR
-// (base64 text), which every span then encoded and the next span decoded again (parsePropBR),
-// and the gRPC interceptors' binary carrier carried the text form, a third bigger than the bytes.
-// The places that need text deal with it themselves: the wrappers' JSON carrier sends values
-// that are not valid UTF-8 as base64 (runtime/core/backend/carrier_json.go, "baggage_bin"), and
-// nothing puts the baggage `_br` on a span attribute.  (encodeBR stays for attributes: OTLP string
-// values must be valid UTF-8.)  The legacy fixed-cpd PB/CGPB still carry `_br` as text, via their
-// `__bag._br` attribute.
+// propBR stores a packed `_br` in baggage as raw bytes in a Go string, with no base64 step. Carriers
+// that need text encode it themselves (the JSON carrier sends non-UTF-8 values as base64). The
+// legacy fixed-distance PB and CGPB still use the base64 form.
 func propBR(packed []byte) string {
 	return string(packed)
 }
 
-// viewPropBR is parsePropBR without the copy: a read-only view of the bytes in s (nil for ""), for
-// callers that only read them (Go strings must never be written).  Tomislav-RetCtx: the S-Bridge
-// reads its parent's `_br` only to copy parts of it (sb_processor.go, startStructural).
+// viewPropBR is parsePropBR without the copy. The result aliases s and must not be written.
 func viewPropBR(s string) []byte {
 	if s == "" {
 		return nil
@@ -51,14 +40,13 @@ func viewPropBR(s string) []byte {
 	return unsafe.Slice(unsafe.StringData(s), len(s))
 }
 
-// propBROwned is propBR without the copy, for a buffer the caller hands over: it must never be
-// written again.  Tomislav-RetCtx.
+// propBROwned is propBR without the copy. The caller hands over packed and must not write it again.
 func propBROwned(packed []byte) string {
 	return unsafe.String(unsafe.SliceData(packed), len(packed))
 }
 
-// parsePropBR reverses propBR: a private copy of the bytes, as decodeBR returned one (the bloom
-// filter may be built over the slice and then written).  Returns nil/false for "".
+// parsePropBR reverses propBR. It returns a private copy, since callers may build a Bloom filter
+// over the bytes and modify it. It returns false for "".
 func parsePropBR(s string) ([]byte, bool) {
 	if s == "" {
 		return nil, false
@@ -66,11 +54,7 @@ func parsePropBR(s string) ([]byte, bool) {
 	return []byte(s), true
 }
 
-// decodeBRDepth extracts only the depth field (the leading varint) from
-// an encoded BR payload string, without unpacking the full message.
-// Lets OnEnd recover OnStart's depth decision without having to keep
-// an intra-process `__bag.prio` attribute around. Returns (0, false)
-// on malformed input.
+// decodeBRDepth reads only the leading depth varint of a base64 `_br`.
 func decodeBRDepth(s string) (int, bool) {
 	raw, ok := decodeBR(s)
 	if !ok {
@@ -83,110 +67,59 @@ func decodeBRDepth(s string) (int, bool) {
 	return int(depth), true
 }
 
-// Wire-format constants ported from bridges/bridge/pack.go. Kept bit-exact
-// so that bagsize numbers measured by the trace_sim Go port apply to the
-// real processor output.
+// Wire-format constants, identical to the trace simulator's so its size measurements carry over.
 const (
-	// "_br" property name overhead.
-	BRPropertyNameOverheadBytes = 3
+	BRPropertyNameOverheadBytes = 3 // len("_br")
 
-	// Bridge type IDs double as byte counts in the simulator's payload
-	// accounting (matching trace_simulator.py).
+	// Bridge type IDs. The simulator also counts them as payload bytes.
 	PBBridgeTypeID  = 1
 	CGPBridgeTypeID = 2
 	SBridgeTypeID   = 3
 
-	// Default bloom false-positive rate used by PB / CGPB.
-	DefaultBloomFPRate = 0.0001
+	DefaultBloomFPRate = 0.0001 // PB and CGPB Bloom filters
 
-	// Baggage-key byte size for "_br".
-	BaggageKeyBytes = 3
+	BaggageKeyBytes = 3 // len("_br")
 )
 
-// BaggageBRKey is the single baggage key under which the bit-packed _br
-// payload travels on the wire (replaces the per-field baggage keys).
+// BaggageBRKey is the baggage key that carries the packed bridge state between services.
 const BaggageBRKey = "_br"
 
-// AttrBR is the SDK span attribute that becomes the OUTGOING `_br`
-// baggage on the next downstream RPC. The opentelemetry plugin wrappers
-// translate `__bag.*` attributes into outgoing baggage by stripping the
-// prefix, so __bag._br → baggage key "_br". The value is the packed
-// PROPAGATION snapshot (post-reset if this span is a checkpoint).
+// AttrBR is the span attribute that becomes the outgoing `_br` baggage (legacy fixed-distance PB and
+// CGPB). The instrumentation turns every `__bag.` attribute into baggage with the prefix stripped.
+// The value is the state to propagate, so a checkpoint's is already reset.
 const AttrBR = "__bag._br"
 
-// AttrBREmit is the WIRE-EXPORT attribute the processor attaches to a
-// span when the span is a checkpoint. Its presence on the exported OTLP
-// span IS the priority signal — matching the simulator's model, where
-// emit-bytes are produced iff the span is a checkpoint (no separate
-// priority bit). The value carries the PRE-RESET packed payload (the
-// full inherited chain ending at this span). Stripped at export time
-// for non-checkpoint spans by createResourceSpans/convertAttributes.
-//
-// Tomislav-RetCtx (user 2026-10-29): on the wire the value is ONE bytes attribute holding
-// everything the checkpoint has to say: uvarint(len(rc)) || rc || payload, where rc is the
-// packed reverse context the checkpoint took over (empty, a single 0x00, when none); the
-// `_rc` attribute beside `_br` is gone (otlp_wire.go appendBridgeWireBytes / splitBR,
-// utils/retctx_wire.py).  Intra-process (legacy fixed-cpd mode) the attribute still holds the
-// base64 of the payload alone.
+// AttrBREmit is the exported attribute of checkpoints (and leaves); its presence marks a span as
+// high priority. It holds the state the span inherited, before any reset. On the wire it is one
+// bytes value, uvarint(len(rc)) || rc || payload, where rc is the packed reverse context the span
+// took over (a single 0x00 when there is none); see appendBridgeWireBytes and splitBR. In the
+// legacy fixed-distance mode the in-process attribute holds the base64 payload alone.
 const AttrBREmit = "_br"
 
-// AttrOC is the ordinal-chain breadcrumb attached to NON-checkpoint spans:
-// packed nearest-ancestor checkpoint id (full 8-byte ckpt, pre-reset) + the ordinal
-// chain (ordinalGroups), WITHOUT endEvents/dee. Kept on the wire iff the span
-// is NON-checkpoint (low-priority); on a checkpoint the full `_br` already
-// carries ckpt+chain, so `_oc` is stripped there as redundant. Lets a
-// surviving non-checkpoint span self-anchor for reconstruction under PARTIAL
-// (duty-cycle) shedding — when its non-checkpoint ancestors were dropped and
-// no downstream checkpoint captured its ordinal.
+// AttrOC is an older SB breadcrumb for non-checkpoints: the nearest checkpoint's ID and the
+// ordinal chain from it, without end events. It let a surviving span place itself when its
+// ancestors were shed. AttrO replaces it.
 const AttrOC = "_oc"
 
-// AttrO is the MINIMAL non-checkpoint breadcrumb: key "_o" ("ordinal"), value
-// = just THIS span's own ordinal (seqNum) as a varint, emitted on the wire as
-// a proto BYTES value (not base64). Replaces the full _oc ordinal chain on
-// non-checkpoints — a surviving non-checkpoint self-places via its native
-// parent_span_id (immediate parent) + this ordinal; the inter-checkpoint chain
-// (with parent fingerprints) lives only in the checkpoint's _br. Carried
-// OnStart→export as a base64 string (UTF-8-safe intra-process); convertAttributes
-// base64-decodes and emits the raw varint bytes.
-//
-// Tomislav-RetCtx (user 2026-10-29): on the wire an ordinary SB span carries `_o` alone,
-// uvarint(ordinal) || uvarint(depth); the `_d` attribute beside it is gone (otlp_wire.go
-// appendBridgeWireBytes).
+// AttrO is the breadcrumb of an SB non-checkpoint: uvarint(child ordinal) || uvarint(depth), as a
+// bytes value. With its parent span ID that is enough to place a surviving span; the chain between
+// checkpoints lives only in the checkpoints' `_br`.
 const AttrO = "_o"
 
-// AttrDepth is the LEAN breadcrumb (experiment): a single int64 depth on
-// NON-checkpoint spans, in place of the base64 _oc string. Minimal payload,
-// full per-KV alloc overhead — used to isolate whether the _oc collapse was
-// payload size or per-attribute allocation cost.
+// AttrDepth is an experimental breadcrumb: the depth alone, as an int64 attribute.
 const AttrDepth = "d"
 
-// OCNameDelim separates the clean operation name from the appended base64
-// breadcrumb in a non-checkpoint span's NAME ("<name>~<base64>"). It must NOT
-// be a base64url char (A-Za-z0-9-_), so the async reconstructor can scan back
-// from the end over base64url chars to the first OCNameDelim, split off the
-// breadcrumb, and restore the clean name.
+// OCNameDelim separates a span name from a breadcrumb appended to it ("<name>~<base64>"). It is not
+// a base64url character, so a reader can split at the last one.
 const OCNameDelim = "~"
 
-// AttrBagPrio is the INTRA-PROCESS span attribute the SDK uses to
-// communicate the OnStart-time priority decision to OnEnd. Stripped at
-// export time along with every other __bag.* attribute — does NOT
-// reach the wire. The collector-side priorityprocessor does NOT read
-// this; it reads AttrBREmit presence instead.
+// AttrBagPrio carries OnStart's priority decision to OnEnd in processors that keep it on the span.
+// Like every `__bag.` attribute it is not exported; the collector decides priority from AttrBREmit.
 const AttrBagPrio = "__bag.prio"
 
-// AttrForceLP is an intra-process escape hatch for synthetic pressure
-// spans. When a span carries `__bag.force_lp = true`, the SB processor's
-// OnEnd classifies the span as LP regardless of depth or leaf-server
-// status. Stripped at export time (__bag.* prefix), so this attribute
-// never reaches the wire.
-//
-// Use case: a service like TracePressureService creates many child spans
-// inside one HTTP request handler via tracer.Start(...). All of those
-// children share the same OTel parent context, which means OnStart sees
-// identical baggage for each and computes identical depthMod. Without
-// this escape hatch, all such children would classify identically to
-// the root span, making it impossible to generate pure-LP volume for
-// stress-testing the priority-aware shedding policy.
+// AttrForceLP (true) makes SB classify a span as low priority whatever its depth. Load generators use
+// it for synthetic spans: siblings started from one context would otherwise all be classified like
+// their parent. Not exported.
 const AttrForceLP = "__bag.force_lp"
 
 // varintEncode encodes a non-negative integer as a protobuf-style varint.
@@ -231,9 +164,7 @@ func packBR(depthMod int, bloomBytes []byte) []byte {
 	return out
 }
 
-// unpackBR reverses packBR. Returns depthMod and the bloomBytes slice
-// (sub-slice of buf — copy if you need to retain it past buf's lifetime).
-// ok=false on a malformed payload.
+// unpackBR reverses packBR. bloomBytes aliases buf.
 func unpackBR(buf []byte) (depthMod int, bloomBytes []byte, ok bool) {
 	v, n := binary.Uvarint(buf)
 	if n <= 0 {
@@ -242,22 +173,15 @@ func unpackBR(buf []byte) (depthMod int, bloomBytes []byte, ok bool) {
 	return int(v), buf[n:], true
 }
 
-// AttrD is the path-bridge depth breadcrumb attached to interior (has-children)
-// NON-checkpoint spans: key "_d", value = varint(ABSOLUTE depth), emitted on
-// the wire as a proto BYTES value (not base64) — exactly mirroring how the SB
-// processor emits "_o" (holding the depth too, since 2026-10-29). A surviving interior non-checkpoint self-places via its
-// native parent_span_id + this depth; the full anchored payload (`_br`) lives
-// only on checkpoints and leaves. Carried OnStart→export as a base64 string
-// (UTF-8-safe intra-process); convertAttributes base64-decodes to raw varint bytes.
+// AttrD is the PB/CGPB breadcrumb of an interior non-checkpoint: varint(absolute depth) as a bytes
+// value. With its parent span ID that places a surviving span; the full `_br` is only on
+// checkpoints and leaves.
 const AttrD = "_d"
 
-// pbBloomCapacity is the path-bridge bloom sizing population: cpd-1, NOT cpd.
-// Threading only ever tests spans STRICTLY between two checkpoints (the anchor
-// is named by the ckpt anchor, never membership-tested; a payload's own span is never
-// tested against itself), and payloads carry the INHERITED (pre-self) bloom —
-// so the deepest payload holds exactly cpd-1 entries. Matches bridges
-// bridge/pcrb.go PCRBBloomCapacity; the recon side must derive (m,k) from the
-// same capacity.
+// pbBloomCapacity is the number of entries a PB Bloom filter is sized for: cpd-1. Only spans strictly
+// between two checkpoints are ever tested (the anchor is named explicitly), and a payload holds
+// the filter as inherited, before its own span is added. Reconstruction must size from the same
+// capacity.
 func pbBloomCapacity(cpd int) int {
 	if cpd <= 2 {
 		return 1
@@ -265,16 +189,13 @@ func pbBloomCapacity(cpd int) int {
 	return cpd - 1
 }
 
-// packPathBridgeBR packs the (canonical, ckpt-anchored) path-bridge payload:
+// packPathBridgeBR packs the PB payload in fixed-distance mode:
 //
 //	varint(absolute depth) || ckpt(8) || bloomBytes
 //
-// Tag-less (PB is the only path bridge). Used for BOTH the emitted `_br`
-// (checkpoints + leaves: depth, the PREVIOUS checkpoint's FULL 8-byte span ID,
-// and the INHERITED pre-self window bloom) AND the propagation baggage (depth,
-// this span's ckpt — own id if checkpoint, inherited otherwise — and the
-// propagated bloom). ckpt is the full big-endian nearest-checkpoint span ID
-// (full-width checkpoint-root fingerprint); all-zero = root.
+// The exported `_br` holds the previous checkpoint's span ID and the inherited filter; the
+// propagated one holds the span's current checkpoint (itself, if it is one) and the filter it
+// passes on. An all-zero ckpt means the root.
 func packPathBridgeBR(depth int, ckpt [8]byte, bloomBytes []byte) []byte {
 	out := make([]byte, 0, varintLen(depth)+8+len(bloomBytes))
 	out = binary.AppendUvarint(out, uint64(maxInt(depth, 0)))
@@ -283,8 +204,7 @@ func packPathBridgeBR(depth int, ckpt [8]byte, bloomBytes []byte) []byte {
 	return out
 }
 
-// unpackPathBridgeBR reverses packPathBridgeBR. bloomBytes is a sub-slice of
-// buf (copy if retaining past buf's lifetime). ok=false on a malformed payload.
+// unpackPathBridgeBR reverses packPathBridgeBR. bloomBytes aliases buf.
 func unpackPathBridgeBR(buf []byte) (depth int, ckpt [8]byte, bloomBytes []byte, ok bool) {
 	v, n := binary.Uvarint(buf)
 	if n <= 0 {
@@ -298,16 +218,13 @@ func unpackPathBridgeBR(buf []byte) (depth int, ckpt [8]byte, bloomBytes []byte,
 	return int(v), ckpt, rest[8:], true
 }
 
-// packCGPRBBR packs the (canonical, ckpt-anchored) call-graph path-bridge
-// payload — CGPRB = PCRB + a window-local hash array:
+// packCGPRBBR packs the CGPB payload in fixed-distance mode: the PB payload plus the window's hash
+// array (HA).
 //
 //	varint(absolute depth) || ckpt(8) || bloomBytes || haBytes
 //
-// Tag-less. bloomBytes is fixed-width (ceil(m/8)) so the decoder splits the HA
-// off as the trailing remainder. Used for BOTH the emitted `_br` (checkpoints +
-// leaves: inherited pre-self bloom + window HA) and the propagation baggage
-// (propagated bloom + HA — reset to empty at a checkpoint). HA entries are
-// (parent_span_id(8) || varint(absolute depth)), appended via haAppendEntry.
+// The filter has a fixed width, so the HA is whatever follows it. A checkpoint propagates an empty
+// HA. Entries are added with haAppendEntry.
 func packCGPRBBR(depth int, ckpt [8]byte, bloomBytes, haBytes []byte) []byte {
 	out := make([]byte, 0, varintLen(depth)+8+len(bloomBytes)+len(haBytes))
 	out = binary.AppendUvarint(out, uint64(maxInt(depth, 0)))
@@ -317,10 +234,7 @@ func packCGPRBBR(depth int, ckpt [8]byte, bloomBytes, haBytes []byte) []byte {
 	return out
 }
 
-// unpackCGPRBBR reverses packCGPRBBR. bloomLen is the fixed bloom byte width
-// (ceil(m/8)); the HA is the trailing remainder. bloomBytes/haBytes are
-// sub-slices of buf (copy if retaining past buf's lifetime). ok=false on a
-// malformed payload.
+// unpackCGPRBBR reverses packCGPRBBR; bloomLen is the filter's width in bytes. The results alias buf.
 func unpackCGPRBBR(buf []byte, bloomLen int) (depth int, ckpt [8]byte, bloomBytes, haBytes []byte, ok bool) {
 	v, n := binary.Uvarint(buf)
 	if n <= 0 {
@@ -346,8 +260,7 @@ func packCGPBBR(depthMod int, bloomBytes, haBytes []byte) []byte {
 	return out
 }
 
-// unpackCGPBBR reverses packCGPBBR. bloomLen is the fixed bloom byte width
-// (ceil(m/8)); the remainder is the hash-array blob.
+// unpackCGPBBR reverses packCGPBBR; bloomLen is the filter's width in bytes.
 func unpackCGPBBR(buf []byte, bloomLen int) (depthMod int, bloomBytes, haBytes []byte, ok bool) {
 	v, n := binary.Uvarint(buf)
 	if n <= 0 {
@@ -360,11 +273,8 @@ func unpackCGPBBR(buf []byte, bloomLen int) (depthMod int, bloomBytes, haBytes [
 	return int(v), rest[:bloomLen], rest[bloomLen:], true
 }
 
-// haAppendEntry appends one CGPB hash-array entry to ha:
-//
-//	entry := parent_span_id_bytes(8) || varint(depthMod)
-//
-// parentSpanID is the 16-char hex span ID. Returns ha unchanged on invalid hex.
+// haAppendEntry appends a CGPB hash-array entry, parent span ID (8) || varint(depth), to a copy of
+// ha. parentSpanID is hex; ha is returned unchanged if it does not parse.
 func haAppendEntry(ha []byte, parentSpanID string, depthMod int) []byte {
 	pid, ok := spanIDHexTo8Bytes(parentSpanID)
 	if !ok {
@@ -377,9 +287,8 @@ func haAppendEntry(ha []byte, parentSpanID string, depthMod int) []byte {
 	return out
 }
 
-// spanIDHexTo8Bytes converts a Jaeger / W3C span-id hex string to 8 raw
-// bytes. Shorter inputs are left-padded with zeros; longer inputs keep the
-// last 8 bytes. Empty / invalid hex returns ok=false.
+// spanIDHexTo8Bytes parses a hex span ID. Short input is zero-padded on the left; long input keeps
+// its last 8 bytes.
 func spanIDHexTo8Bytes(s string) ([8]byte, bool) {
 	var out [8]byte
 	if s == "" {
@@ -400,8 +309,7 @@ func spanIDHexTo8Bytes(s string) ([8]byte, bool) {
 	return out, true
 }
 
-// traceIDHexTo16Bytes converts a W3C trace-id hex string to 16 raw bytes.
-// Empty / invalid hex returns 16 zero bytes.
+// traceIDHexTo16Bytes parses a hex trace ID like spanIDHexTo8Bytes; invalid input gives zeros.
 func traceIDHexTo16Bytes(s string) [16]byte {
 	var out [16]byte
 	if s == "" {

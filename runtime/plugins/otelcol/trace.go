@@ -1,4 +1,5 @@
-// Package otelcol implements a tracer [backend.Tracer] client interface for the OpenTelemetry collector.
+// Package otelcol is the run-time side of tracing: a [backend.Tracer] that exports to an OpenTelemetry
+// collector, and the span processors (vanilla and the bridges) that decide what is exported and how.
 package otelcol
 
 import (
@@ -13,11 +14,9 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// SampleRatioEnv sets a head-based sampling ratio in [0,1]. The decision is made
-// once at the trace root (ingress) via ParentBased(TraceIDRatioBased) and
-// propagated downstream, so a whole trace is either fully recorded or fully
-// dropped. Unset or >=1 => AlwaysSample (default, unchanged behavior); <=0 =>
-// NeverSample. Set per-pod via `kubectl set env ... OTEL_SAMPLE_RATIO=0.1`.
+// SampleRatioEnv sets a head-based sampling ratio in [0,1]. The decision is made once, at the trace
+// root, and inherited downstream (ParentBased(TraceIDRatioBased)), so a trace is recorded completely
+// or not at all. Unset or >= 1 samples everything; <= 0 samples nothing.
 const SampleRatioEnv = "OTEL_SAMPLE_RATIO"
 
 // headSampler builds the SDK sampler from SampleRatioEnv.
@@ -37,39 +36,31 @@ func headSampler() tracesdk.Sampler {
 	return tracesdk.ParentBased(tracesdk.TraceIDRatioBased(r))
 }
 
-// BridgeKindEnv is the env-var name used to pick a bridge processor at
-// service startup. Keep in sync with the variant suffix in the wiring spec
-// (examples/dsb_sn/wiring/specs/docker.go).
+// BridgeKindEnv selects the span processor when a service starts. The wiring specs set it for each
+// service variant. Values:
 //
-// Accepted values:
-//
-//	pb       — path-bridge (default if unset / unknown)
-//	cgpb     — call-graph + path bridge
-//	sb       — structural bridge
-//	eb       — exact bridge
-//	v        — vanilla (no-op bridge, just OTLP export)
-//	priority — priority-only span processor
-//	realtime — real-time partial-span processor (start/end events)
+//	pb       path bridge (also used when unset or unknown)
+//	cgpb     call-graph path bridge
+//	sb       structural bridge
+//	eb       exact bridge
+//	v        vanilla: plain OTLP export, no bridge
+//	rc       random checkpoints
+//	priority priority export only
+//	realtime partial spans (start and end events)
 const BridgeKindEnv = "BRIDGE_KIND"
 
-// OTCollectorTracer implements the runtime backend instance that implements the backend/trace.Tracer interface.
-// REQUIRED: A functional backend running the OpenTelemetry collector.
+// OTCollectorTracer is a [backend.Tracer] that exports spans to an OpenTelemetry collector.
 type OTCollectorTracer struct {
 	tp trace.TracerProvider
-	// Tomislav-RetCtx: whether the bridge processor adds "__bag." attributes in OnStart (see
-	// StartAttributeBaggage below).
+	// startAttrBaggage reports whether the span processor adds "__bag." attributes in OnStart.
 	startAttrBaggage bool
 }
 
-// NewOTCollectorTracer returns a new instance of OTCollectorTracer.
-// Configures opentelemetry to export traces to the OpenTelemetry collector
-// hosted at address `addr`. The additionalPort parameter is used as the
-// config discovery port for fetching configuration.
+// NewOTCollectorTracer creates a tracer that exports to the collector at addr. additionalPort is the
+// collector's config discovery port, from which the bridges read their parameters.
 //
-// The bridge processor wired into the tracer provider is selected at
-// startup by the BRIDGE_KIND env var (see [BridgeKindEnv]). Default is
-// path-bridge; an unrecognized value logs a warning and falls back to
-// path-bridge so a typo in the env doesn't crash the service.
+// The span processor is chosen by [BridgeKindEnv]. An unknown value logs a warning and falls back
+// to the path bridge.
 func NewOTCollectorTracer(ctx context.Context, addr string, additionalPort string) (*OTCollectorTracer, error) {
 	kind := os.Getenv(BridgeKindEnv)
 	spanProcessor, resolvedKind, err := newBridgeProcessor(ctx, kind, addr, additionalPort)
@@ -78,15 +69,14 @@ func NewOTCollectorTracer(ctx context.Context, addr string, additionalPort strin
 	}
 	slog.Info("✅ OTCollectorTracer initialized", "bridge_kind", resolvedKind, "addr", addr)
 
-	// Tomislav-RetCtx: processors that know they never add "__bag." attributes in OnStart say so
-	// (startAttributeBaggage, next to each processor's OnStart); every other processor is assumed
-	// to.  Asked before the reverse-checkpoint wrapper goes around it, which adds none itself.
+	// Processors that never add "__bag." attributes in OnStart say so; assume the others do. Ask
+	// before wrapping: the reverse-checkpoint wrapper adds none itself.
 	startAttrBaggage := true
 	if r, ok := spanProcessor.(interface{ startAttributeBaggage() bool }); ok {
 		startAttrBaggage = r.startAttributeBaggage()
 	}
 
-	// Tomislav-RetCtx: expose SDK finalization to wrappers before Span.End.
+	// Lets the instrumentation finish a span's checkpoint state before Span.End.
 	spanProcessor = wrapReverseCheckpointProcessor(spanProcessor)
 	tp := tracesdk.NewTracerProvider(
 		tracesdk.WithSampler(headSampler()),
@@ -98,9 +88,8 @@ func NewOTCollectorTracer(ctx context.Context, addr string, additionalPort strin
 	return &OTCollectorTracer{tp, startAttrBaggage}, nil
 }
 
-// newBridgeProcessor dispatches on the BRIDGE_KIND value. Returns the
-// constructed processor and the resolved kind (helpful for logging when the
-// env var was empty or unknown).
+// newBridgeProcessor creates the processor for a BRIDGE_KIND value. It also returns the kind it
+// resolved to, for logging when the value was empty or unknown.
 func newBridgeProcessor(ctx context.Context, kind, addr, port string) (tracesdk.SpanProcessor, string, error) {
 	switch kind {
 	case "", "pb":
@@ -161,12 +150,11 @@ func newBridgeProcessor(ctx context.Context, kind, addr, port string) (tracesdk.
 	}
 }
 
-// StartAttributeBaggage implements backend.AttributeBaggageReporter
-// (runtime/core/backend/span_baggage.go).  The sampler (headSampler above) adds no attributes, so
-// only the bridge processor decides.
+// StartAttributeBaggage implements [backend.AttributeBaggageReporter]. The sampler adds no
+// attributes, so only the span processor matters.
 func (t *OTCollectorTracer) StartAttributeBaggage() bool { return t.startAttrBaggage }
 
-// Implements the backend/trace interface.
+// GetTracerProvider implements [backend.Tracer].
 func (t *OTCollectorTracer) GetTracerProvider(ctx context.Context) (trace.TracerProvider, error) {
 	return t.tp, nil
 }

@@ -4,7 +4,7 @@ import (
 	"github.com/blueprint-uservices/blueprint/runtime/plugins/bloom"
 )
 
-// Constants for baggage keys
+// Baggage keys under which the bridges store their per-span state.
 const (
 	BAG_BLOOM_FILTER       = "__bag.bf"
 	BAG_HASH_ARRAY         = "__bag.ha"
@@ -13,59 +13,53 @@ const (
 	BAG_DELAYED_END_EVENTS = "__bag.dee"
 )
 
-// Ancestry tagging keys
+// Span attribute keys for the ancestry tags.
 const (
 	AncestryModeKey  = "ancestry_mode"
 	AncestryKey      = "ancestry"
 	AncestryExtraKey = "ancestry2"
 )
 
-// AncestryMode selects the ancestry encoding strategy
+// AncestryMode selects how a span's ancestry is encoded. The values are single bytes so the mode
+// costs one byte on the wire.
 type AncestryMode string
 
 var (
-	// AncestryModeBloom  AncestryMode = "bloom"
-	// AncestryModeHash   AncestryMode = "hash"
-	// AncestryModeHybrid AncestryMode = "hybrid"
 	AncestryModePB     AncestryMode = AncestryMode(string([]byte{0x00}))
 	AncestryModeHash   AncestryMode = AncestryMode(string([]byte{0x01}))
 	AncestryModeHybrid AncestryMode = AncestryMode(string([]byte{0x02}))
 )
 
-// Manual toggle: when true, both high and low priority spans are exported
-// via the high-priority OTLP client (single channel). When false, low
-// priority spans use a separate OTLP client/endpoint.
+// singleOTLPClient exports high- and low-priority spans over one OTLP client. When false, low-priority
+// spans get their own client and endpoint.
 const singleOTLPClient = true
 
-// Bloom filter parameters (m = bit array size, k = number of hash functions)
+// Bloom filter parameters: m is the bit array size, k the number of hash functions.
 var (
-	BloomFilterM uint64 = 10 // Size of bit array in bits
-	BloomFilterK uint   = 7  // Number of hash functions
+	BloomFilterM uint64 = 10
+	BloomFilterK uint   = 7
 )
 
-// ConfigResponse represents the response from the config discovery endpoint
+// ConfigResponse is the body returned by the collector's config discovery endpoint.
 type ConfigResponse struct {
 	Config map[string]interface{} `json:"config"`
 }
 
-// serializeBloomFilter converts a bloom filter to a base64-encoded string.
-// Only serializes the bit array, not metadata (much more efficient than GobEncode).
+// serializeBloomFilter encodes only the filter's bit array, as base64.
 func serializeBloomFilter(bf *bloom.BloomFilter) (string, error) {
 	return bf.Serialize(), nil
 }
 
-// deserializeBloomFilter converts a base64-encoded string back to a bloom filter.
-// Uses minimal deserialization (only the bit array).
+// deserializeBloomFilter is the inverse of serializeBloomFilter.
 func deserializeBloomFilter(serialized string) (*bloom.BloomFilter, error) {
 	return bloom.Deserialize(serialized, BloomFilterM, BloomFilterK)
 }
 
-// createEmptyBloomFilter creates a new empty bloom filter
 func createEmptyBloomFilter() *bloom.BloomFilter {
 	return bloom.New(BloomFilterM, BloomFilterK)
 }
 
-// getBaggageKeys returns the keys from a baggage map for logging
+// getBaggageKeys lists a baggage map's keys, for log messages.
 func getBaggageKeys(baggage map[string]string) []string {
 	keys := make([]string, 0, len(baggage))
 	for k := range baggage {

@@ -1,17 +1,11 @@
 package otelcol
 
-// Tomislav-RetCtx: per-span bridge wire state, kept beside the span instead of on the OTel
-// attribute store (same approach and rationale as reverse_state.go for the response path).
+// Per-span bridge state, kept in a table beside the span rather than as span attributes.
 //
-// A deployed CPU profile of the hotel frontend at 12k rps (2026-09-23) put the ranged path
-// bridge at +25 s of CPU per 30 s over vanilla. Most of what OnStart and OnEnd paid for was
-// attribute bookkeeping, not the bridge protocol: OnStart wrote five attributes, of which only
-// `__bag._br` has to be on the span (the generated RPC wrapper propagates `__bag.`-prefixed
-// attributes as baggage); `_br` and `_d` were base64-encoded only to be decoded back to raw
-// bytes at export, `depth` and `__bag.prio` never reach the wire, and every reader
-// (reverse OnStart, PrepareCheckpoint, classification, export) paid a locked dedupe of the
-// whole attribute set to find them. The state now lives here as raw bytes: stored once at
-// OnStart, read by the response path, taken (and so freed) at OnEnd.
+// Attributes are expensive here: every read dedupes the span's whole attribute set under a lock,
+// and values must be strings. Only the outgoing `_br` baggage has to reach other services; the rest
+// is read by this process alone. So OnStart stores the state once as raw bytes, the response path
+// reads it, and OnEnd takes (and frees) it.
 
 import (
 	"sync"
@@ -22,23 +16,22 @@ import (
 
 // bridgeWire is one span's bridge state that never has to be on the OTel span.
 type bridgeWire struct {
-	emit     []byte // wire payload for `_br` (kept on checkpoints and leaves), raw bytes
-	depth    int    // absolute depth; `_d` on the wire for interior non-checkpoints
-	priority bool   // scheduled checkpoint (formerly the __bag.prio attribute == 1)
-	prop     string // outgoing `_br` baggage value (formerly the __bag._br attribute)
-	// SB only: non-checkpoints also carry `_o`, this span's child ordinal.
+	emit     []byte // exported `_br` payload (checkpoints and leaves)
+	depth    int    // absolute depth, exported as `_d` on interior non-checkpoints
+	priority bool   // scheduled checkpoint
+	prop     string // outgoing `_br` baggage value
+	// SB only: non-checkpoints also export `_o`, the span's child ordinal.
 	structural bool
 	ordinal    int
-	// rev is the response path's per-span state (reverse_checkpoint.go) for bridge spans, so
-	// the reverse wrapper needs no table of its own for them.
+	// rev is the response path's state for this span (reverse_checkpoint.go).
 	rev reverseSpanState
 }
 
 // bridgeWires is process-wide: one bridge processor per service, and span IDs are unique.
 var bridgeWires = newWireTable()
 
-// The RPC wrappers merge a bridge span's outgoing `_br` from here (backend.AppendSpanBaggage)
-// before applying the span's `__bag.` attributes, which bridges no longer set.
+// The instrumentation adds a bridge span's outgoing `_br` to its baggage from this table
+// (backend.AppendSpanBaggage).
 func init() {
 	backend.RegisterSpanBaggageSource(func(sc trace.SpanContext, baggage map[string]string) {
 		if w := bridgeWires.load(sc.SpanID()); w != nil {
@@ -47,9 +40,9 @@ func init() {
 	})
 }
 
-// wireTable is a sharded map keyed by span ID for store-once / load / take-once state. (Not a
-// generic type: the Blueprint compiler parses this package and its Go parser does not accept
-// type parameters.)
+// wireTable is a sharded map from span ID to state that is stored once, read, and taken once.
+// It is not generic because Blueprint's compiler parses this package with a parser that does not
+// accept type parameters.
 const wireTableShards = 64
 
 type wireTableShard struct {
@@ -78,9 +71,9 @@ func (t *wireTable) shard(id trace.SpanID) *wireTableShard {
 func (t *wireTable) store(id trace.SpanID, v *bridgeWire) {
 	s := t.shard(id)
 	s.mu.Lock()
-	if _, dup := s.m[id]; dup { // Tomislav-RetCtx: invariant: stored once per span (OnStart), taken at OnEnd
+	if _, dup := s.m[id]; dup {
 		s.mu.Unlock()
-		brokenRule("a span's wire entry is stored once") // invariants.go
+		brokenRule("a span's wire entry is stored once")
 	}
 	s.m[id] = v
 	s.mu.Unlock()
@@ -94,7 +87,7 @@ func (t *wireTable) load(id trace.SpanID) *bridgeWire {
 	return v
 }
 
-// take loads and deletes.
+// take loads and deletes the entry.
 func (t *wireTable) take(id trace.SpanID) *bridgeWire {
 	s := t.shard(id)
 	s.mu.Lock()

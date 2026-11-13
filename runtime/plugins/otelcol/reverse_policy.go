@@ -17,23 +17,21 @@ const (
 	reversePolicyProbability  = "probability"
 	reversePolicyInverseDepth = "inverse_depth"
 	reversePolicyDepthLinear  = "depth_linear"
-	// Tomislav-RetCtx: depth_cubic, ported from the bridges repo (bridge/reverse.go,
-	// reverseAcceptance): weights proportional to (d+1)^3 over the origin's ancestors,
-	// normalized by sum_{j=1..n} j^3 = (n(n+1)/2)^2. First-hop acceptance 4n/(n+1)^2 -> 4/n,
-	// so trusses are absorbed close to their leaf instead of riding toward the root.
+	// depth_cubic weights each ancestor of the origin by (d+1)^3, normalized by
+	// sum_{j=1..n} j^3 = (n(n+1)/2)^2. The first hop accepts with probability 4n/(n+1)^2 ~ 4/n,
+	// so trusses are absorbed near their leaf rather than travelling to the root.
 	reversePolicyDepthCubic = "depth_cubic"
 )
 
-// Tomislav-RetCtx: collector-discovered reverse routing, immutable before spans
-// start. Zero value keeps TTL behavior; probability policies need no new carrier
-// metadata because every truss already contains its leaf's absolute depth.
+// reversePolicy decides where a truss travelling back up the call path is emitted. It is read from
+// the collector's config before any span starts. The zero value is the TTL policy. The
+// probabilistic policies need no extra metadata: every truss carries its leaf's absolute depth.
 type reversePolicy struct {
 	mode        string
 	probability float64
-	// Tomislav-RetCtx: reverse_passthrough (discovery key, default false). Off: a scheduled
-	// (cpd-assigned) checkpoint terminates every returned truss. On: it routes returned
-	// trusses like any other non-root span -- each segment is emitted there with the policy's
-	// probability (or at TTL 0) and otherwise travels on upstream. The root always terminates.
+	// passthrough (config key reverse_passthrough, default false): when off, a scheduled checkpoint
+	// absorbs every returned truss; when on, it routes them like any other non-root span. The root
+	// always absorbs.
 	passthrough bool
 }
 
@@ -95,13 +93,12 @@ func (p reversePolicy) probabilistic() bool {
 	return p.mode != "" && p.mode != reversePolicyTTL
 }
 
-// Tomislav-RetCtx: n is this truss's leaf depth, not the deepest sibling's depth;
-// d is the current receiver depth. Linear probabilities sum to one across the
-// n potential receivers (d=0..n-1), just like 1/n, but favor deeper receivers.
-// These are conditional per-node probabilities, not final emission weights.
+// probabilityAt is the probability that the ancestor at depth d emits a truss whose leaf is at
+// depth n. It is a per-node conditional probability, not the overall emission weight. Like 1/n,
+// depth_linear sums to one over the n receivers but favours deeper ones.
 func (p reversePolicy) probabilityAt(d, n uint64) float64 {
 	if n == 0 || d >= n {
-		return 0 // Invalid ancestry cannot supply a depth-based decision.
+		return 0 // invalid ancestry
 	}
 	switch p.mode {
 	case reversePolicyProbability:
@@ -109,11 +106,10 @@ func (p reversePolicy) probabilityAt(d, n uint64) float64 {
 	case reversePolicyInverseDepth:
 		return 1 / float64(n)
 	case reversePolicyDepthLinear:
-		// Convert before adding/multiplying to avoid uint64 overflow.
+		// float64 before the arithmetic, so large depths cannot overflow
 		return (2 * ((float64(d) + 1) / float64(n))) / (float64(n) + 1)
 	case reversePolicyDepthCubic:
-		// 4 (d+1)^3 / (n^2 (n+1)^2), exactly bridge/reverse.go's depth_cubic. Floats
-		// before arithmetic so extreme depths cannot overflow uint64.
+		// 4 (d+1)^3 / (n^2 (n+1)^2)
 		dd, nn := float64(d)+1, float64(n)
 		return 4 * dd * dd * dd / (nn * nn * (nn + 1) * (nn + 1))
 	default:
@@ -127,6 +123,8 @@ func (p reversePolicy) terminates(scheduled, root bool) bool {
 	return root || (scheduled && !p.passthrough)
 }
 
+// route splits a reverse context into the part this span emits and the part it passes upstream.
+// draw returns a uniform random number in [0,1).
 func (p reversePolicy) route(retCtx string, originalCheckpoint bool, depth uint64, draw func() float64) (string, string) {
 	if !p.probabilistic() {
 		return backend.RouteRetCtx(retCtx, originalCheckpoint)

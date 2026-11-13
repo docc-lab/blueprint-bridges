@@ -2,18 +2,15 @@ package otelcol
 
 import "github.com/blueprint-uservices/blueprint/runtime/core/backend"
 
-// Tomislav-RetCtx (user 2026-11-06: "add bounds checks and assertions where appropriate inside of the
-// vanilla, pb, cgpb, and sb sdk-side processors"): the failure paths of the processors' invariant
-// checks.  Each check is a comparison on the span path; when one fails these format the values and
-// call backend.InvariantBroken (runtime/core/backend/invariant.go), which panics.  They are out of
-// line and take plain ints and strings so that a check adds a compare and a short call to OnStart /
-// OnEnd, whose stack frames earlier profiling found worth keeping small (utils/grpc_interceptors/
-// README.md, "Stack growth").
+// Failure paths of the processors' invariant checks. A check is an inline comparison; when it
+// fails, one of these reports the rule and values through backend.InvariantBroken, which panics.
+// They are kept out of line, with plain arguments, so a check costs OnStart and OnEnd only a
+// compare and a short call and does not grow their stack frames.
 //
-// Checked are only conditions that a bug in this code breaks, never the input of other systems:
-// what a parent span of the same bridge wrote (`_br`), what the instrumentation of this process
-// wrote (seqNum, remEndEvents), the store-once / take-once wire table, ordinal and distance bounds,
-// and the export bytes' own framing.
+// The checks cover only what a bug in this package could break, never input from other systems:
+// `_br` written by a parent span of the same bridge, values this process's instrumentation wrote
+// (seqNum, remEndEvents), the wire table's store-once / take-once rule, ordinal and distance
+// bounds, and the framing of the exported bytes.
 
 //go:noinline
 func brokenInt(rule, what string, n, bound int) {
