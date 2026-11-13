@@ -123,7 +123,7 @@ func Instrument(spec wiring.WiringSpec, serviceName string, collectorName string
 
 }
 
-// Tomislav-RetCtx: [InstrumentGRPC] traces `serviceName` with gRPC interceptors instead of wrappers.
+// [InstrumentGRPC] traces `serviceName` with gRPC interceptors instead of wrappers.
 //
 // The service must also be deployed with grpc.Deploy (before or after this call, either works).  Its
 // interface is left unchanged; a server interceptor on its gRPC server and a client interceptor on
@@ -167,7 +167,7 @@ func InstrumentGRPC(spec wiring.WiringSpec, serviceName string, collectorName st
 	grpc.AddClientInterceptor(spec, serviceName, clientInterceptor)
 }
 
-// Tomislav-RetCtx: [InstrumentHTTP] traces `serviceName` with HTTP middleware instead of wrappers:
+// [InstrumentHTTP] traces `serviceName` with HTTP middleware instead of wrappers:
 // the HTTP counterpart of [InstrumentGRPC].
 //
 // The service must also be deployed with http.Deploy (before or after this call, either works).  Its

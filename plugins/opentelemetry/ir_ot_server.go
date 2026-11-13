@@ -198,10 +198,8 @@ func generateServerHandler(builder golang.ModuleBuilder, wrapped *gocode.Service
 		"go.opentelemetry.io/otel/sdk/trace",
 		"strconv",
 	)
-	// Tomislav-RetCtx: packages only some kinds' templates use.  Go refuses an unused import, so adding
-	// them for every kind made every wrapper build fail ("encoding/base64" has had no user since the
-	// reverse context became raw bytes, vanilla never used "sync/atomic", SB's "sync" was commented
-	// out): the child counter (PB, CGPB, SB), SB's end-event mutex and its remEndEvents encoding.
+	// Imports that only some kinds' templates use (Go rejects unused imports): the child counter (PB,
+	// CGPB, SB), and SB's end-event mutex and remEndEvents encoding.
 	switch os.Getenv("OT_BRIDGE") {
 	case "pb", "path", "rc", "", "cgpb":
 		server.Imports.AddPackages("sync/atomic")
@@ -230,7 +228,7 @@ func generateServerHandler(builder golang.ModuleBuilder, wrapped *gocode.Service
 		stmpl = serverTemplateSBridge
 	case "pb", "path", "rc", "":
 		stmpl = serverTemplatePath
-	default: // Tomislav-RetCtx: invariant, as interceptors.variantFor at run time (it used to mean the path bridge)
+	default: // an unknown kind is a broken invariant, as in interceptors.variantFor
 		return blueprint.Errorf("OT_BRIDGE=%q is not one of v, vanilla, pb, path, rc, cgpb, sb or empty", os.Getenv("OT_BRIDGE"))
 	}
 	slog.Info(fmt.Sprintf("OT server wrapper: OT_BRIDGE=%q", os.Getenv("OT_BRIDGE")))
@@ -289,7 +287,7 @@ func generateClientSideInterfaces(builder golang.ModuleBuilder, iface *gocode.Se
 // 		span_ctx_config, upstreamBaggage, _ := backend.GetSpanContext(traceCtx)
 // 		span_ctx := trace.NewSpanContext(span_ctx_config)
 // 		ctx = trace.ContextWithRemoteSpanContext(ctx, span_ctx)
-// 		
+//
 // 		// Set baggage in context for span processor to read
 // 		if upstreamBaggage != nil {
 // 			baggage = upstreamBaggage
@@ -346,7 +344,7 @@ func generateClientSideInterfaces(builder golang.ModuleBuilder, iface *gocode.Se
 // 	// Enable line below for S-Bridge
 // 	// ctx = context.WithValue(ctx, "endEvents", &endEvents)
 // 	// ctx = context.WithValue(ctx, "endEventsMutex", &endEventsMutex) // Old
-// 	
+//
 // 	{{RetVars $f "err"}} = handler.Service.{{$f.Name}}({{ArgVars $f "ctx"}})
 // 	if err != nil {
 // 		span.RecordError(err)
@@ -361,7 +359,7 @@ func generateClientSideInterfaces(builder golang.ModuleBuilder, iface *gocode.Se
 // 	// }
 // 	// ccMutex.Unlock()
 // 	// span.SetAttributes(attribute.String("remEndEvents", remEndEvents))
-// 	
+//
 // 	// Enable line below for S-Bridge
 // 	// span.SetAttributes(attribute.String("remEndEvents", endEvents))
 //
@@ -442,8 +440,8 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	if baggage == nil {
 		baggage = make(map[string]string)
 	}
-	// Tomislav-RetCtx: baggage the SDK keeps beside the span first (runtime/core/backend/
-	// span_baggage.go), then the span's "__bag." attributes as always (they take precedence).
+	// Baggage the SDK keeps beside the span first, then the span's "__bag." attributes, which take
+	// precedence.
 	backend.AppendSpanBaggage(span, baggage)
 	if rwSpan, ok := span.({{$sdktrace}}.ReadWriteSpan); ok {
 		for _, attr := range rwSpan.Attributes() {
@@ -551,8 +549,8 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Sampling-aware fast path: compact "U:" carrier = head-unsampled upstream ->
 	// skip JSON deserialize/baggage/span; restore remote ctx and call the service.
 	if len(traceCtx) >= 50 && traceCtx[0:2] == "U:" {
-		// Tomislav-RetCtx: invariants (runtime/core/backend/invariant.go): only a traced caller writes
-		// this carrier, "U:" and 32 + 16 hex digits naming a valid trace and span.
+		// Only a traced caller writes this carrier:
+		// "U:" and 32 + 16 hex digits naming a valid trace and span.
 		if len(traceCtx) != 50 {
 			backend.InvariantBroken("an unsampled carrier is U: and 48 hex digits", "length=", len(traceCtx))
 		}
@@ -567,10 +565,10 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 		return
 	}
 	var baggage map[string]string
-	var callerTraceID trace.TraceID // Tomislav-RetCtx: the trace the server span must continue
+	var callerTraceID trace.TraceID // the trace the server span must continue
 	if traceCtx != "" {
 		span_ctx_config, upstreamBaggage, carrierErr := backend.GetSpanContext(traceCtx)
-		if carrierErr != nil { // Tomislav-RetCtx: only a traced caller writes this carrier
+		if carrierErr != nil { // only a traced caller writes this carrier
 			backend.InvariantBroken("the forward carrier decodes", carrierErr)
 		}
 		span_ctx := trace.NewSpanContext(span_ctx_config)
@@ -592,7 +590,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
 	// CGPB HA / SB ordinals are never emitted).
 	if baggage != nil {
-		// Tomislav-RetCtx: a bridge caller always sends its child ordinal, an integer >= 1.
+		// A bridge caller always sends its child ordinal, an integer >= 1.
 		sv, ok := baggage["__seq"]
 		if !ok {
 			backend.InvariantBroken("a bridge caller sends its child ordinal (__seq)", "kind=sb")
@@ -605,13 +603,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	}
 
 	tp, tpErr := handler.CollClient.GetTracerProvider(ctx)
-	if tpErr != nil { // Tomislav-RetCtx: invariant (runtime/core/backend/invariant.go)
+	if tpErr != nil {
 		backend.InvariantBroken("the collector client provides a tracer provider", tpErr)
 	}
 	tr := tp.Tracer("{{$service}}")
 	ctx, span := tr.Start(ctx, "{{$service}}Server_{{$f.Name}}", trace.WithSpanKind(trace.SpanKindServer))
 	defer span.End()
-	// Tomislav-RetCtx: the span the SDK started is valid and continues the caller's trace.
+	// The span the SDK started is valid and continues the caller's trace.
 	if sc := span.SpanContext(); !sc.IsValid() || (traceCtx != "" && sc.TraceID() != callerTraceID) {
 		backend.InvariantBroken("the server span is valid and continues the caller's trace", "caller=", callerTraceID.String(), " span=", sc.TraceID().String())
 	}
@@ -620,13 +618,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	if baggage == nil {
 		baggage = make(map[string]string)
 	}
-	// Tomislav-RetCtx: baggage the SDK keeps beside the span first (runtime/core/backend/
-	// span_baggage.go), then the span's "__bag." attributes as always (they take precedence).
+	// Baggage the SDK keeps beside the span first, then the span's "__bag." attributes, which take
+	// precedence.
 	backend.AppendSpanBaggage(span, baggage)
 	if rwSpan, ok := span.({{$sdktrace}}.ReadWriteSpan); ok {
 		for _, attr := range rwSpan.Attributes() {
 			if backend.IsReverseBaggageKey(attr.Key) {
-				continue // Tomislav-RetCtx: reverse context travels on the RPC response only.
+				continue // reverse context travels on the RPC response only.
 			}
 			if strings.HasPrefix(string(attr.Key), "__bag.") {
 				key := strings.TrimPrefix(string(attr.Key), "__bag.")
@@ -667,7 +665,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	ctx = context.WithValue(ctx, "endEvents", &endEvents)
 	ctx = context.WithValue(ctx, "childrenMutex", &childrenMutex)
 
-	// Tomislav-RetCtx: each request owns a mutex-protected return accumulator.
+	// Each request owns a mutex-protected return accumulator.
 	ctx = backend.WithRetMerge(ctx)
 
 	{{RetVars $f "err"}} = handler.Service.{{$f.Name}}({{ArgVars $f "ctx"}})
@@ -677,10 +675,10 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 
 	children := int(childCount.Load())
 	span.SetAttributes(attribute.Int("childCount", children))
-	if len(endEvents) > children { // Tomislav-RetCtx: every end event belongs to a child that took its ordinal first
+	if len(endEvents) > children { // every end event belongs to a child that took its ordinal first
 		backend.InvariantBroken("no more SB end events than children", "endEvents=", len(endEvents), " children=", children)
 	}
-	// Tomislav-RetCtx: delayed orthogonal truss summary for the SB processor:
+	// The delayed end-event summary for the SB processor:
 	// varint(children) || varint(count) || count*varint(start ordinal), in end
 	// order, dropping the last end (implied at reconstruction). The processor
 	// stamps this span's trace/span ID on it and queues it for the next call.
@@ -692,24 +690,23 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 		for _, s := range kept {
 			buf = binary.AppendUvarint(buf, uint64(s))
 		}
-		// Tomislav-RetCtx: the raw bytes in a string (OTel attributes have no []byte
-		// type).  The SB processor reads them at OnEnd in this process and never
-		// exports the attribute, so the base64 it used to take was decoded right away.
+		// Raw bytes in a string (OTel attributes have no []byte type); the SB processor
+		// reads them at OnEnd and never exports the attribute.
 		span.SetAttributes(attribute.String("remEndEvents", string(buf)))
 	}
 
-	// Tomislav-RetCtx: finalize merged returns after child/event counts settle.
+	// Finalize merged returns after child/event counts settle.
 	// This server spends one reverse hop; fan-in itself spends none.
 	// Deferred End exports the span with the SDK's completed decision.
 	if backend.ReverseTrussEnabled() {
 		retCtx = backend.MergedChildren(ctx)
-		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, children); prepared { // Tomislav-RetCtx: the child count, not read back off the span
+		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, children); prepared { // the child count, not read back off the span
 			retCtx = out
 		}
-		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // Tomislav-RetCtx: the only form a service sends
+		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // the only form a service sends
 			backend.InvariantBroken("the reverse context sent back is a packed envelope", "first byte=", retCtx[0])
 		}
-		// Tomislav-RetCtx: raw in the process; the response field needs text.
+		// Raw in the process; the response field needs text.
 		retCtx = backend.RetCtxText(retCtx)
 	}
 	return
@@ -750,8 +747,8 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// span start entirely; just restore the (unsampled) remote span context so
 	// downstream hops stay consistent, then call the service.
 	if len(traceCtx) >= 50 && traceCtx[0:2] == "U:" {
-		// Tomislav-RetCtx: invariants (runtime/core/backend/invariant.go): only a traced caller writes
-		// this carrier, "U:" and 32 + 16 hex digits naming a valid trace and span.
+		// Only a traced caller writes this carrier:
+		// "U:" and 32 + 16 hex digits naming a valid trace and span.
 		if len(traceCtx) != 50 {
 			backend.InvariantBroken("an unsampled carrier is U: and 48 hex digits", "length=", len(traceCtx))
 		}
@@ -767,10 +764,10 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	}
 
 	var baggage map[string]string
-	var callerTraceID trace.TraceID // Tomislav-RetCtx: the trace the server span must continue
+	var callerTraceID trace.TraceID // the trace the server span must continue
 	if traceCtx != "" {
 		span_ctx_config, upstreamBaggage, carrierErr := backend.GetSpanContext(traceCtx)
-		if carrierErr != nil { // Tomislav-RetCtx: only a traced caller writes this carrier
+		if carrierErr != nil { // only a traced caller writes this carrier
 			backend.InvariantBroken("the forward carrier decodes", carrierErr)
 		}
 		span_ctx := trace.NewSpanContext(span_ctx_config)
@@ -794,7 +791,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	if baggage != nil {
 		if sv, ok := baggage["__seq"]; ok {
 			n, e := strconv.Atoi(sv)
-			if e != nil || n < 1 { // Tomislav-RetCtx: an ordinal, when a caller sends one, is an integer >= 1
+			if e != nil || n < 1 { // an ordinal, when a caller sends one, is an integer >= 1
 				backend.InvariantBroken("the caller's child ordinal (__seq) is an integer >= 1", "__seq=", sv)
 			}
 			ctx = context.WithValue(ctx, "seqNum", n)
@@ -802,13 +799,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	}
 
 	tp, tpErr := handler.CollClient.GetTracerProvider(ctx)
-	if tpErr != nil { // Tomislav-RetCtx: invariant (runtime/core/backend/invariant.go)
+	if tpErr != nil {
 		backend.InvariantBroken("the collector client provides a tracer provider", tpErr)
 	}
 	tr := tp.Tracer("{{$service}}")
 	ctx, span := tr.Start(ctx, "{{$service}}Server_{{$f.Name}}", trace.WithSpanKind(trace.SpanKindServer))
 	defer span.End()
-	// Tomislav-RetCtx: the span the SDK started is valid and continues the caller's trace.
+	// The span the SDK started is valid and continues the caller's trace.
 	if sc := span.SpanContext(); !sc.IsValid() || (traceCtx != "" && sc.TraceID() != callerTraceID) {
 		backend.InvariantBroken("the server span is valid and continues the caller's trace", "caller=", callerTraceID.String(), " span=", sc.TraceID().String())
 	}
@@ -817,13 +814,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	if baggage == nil {
 		baggage = make(map[string]string)
 	}
-	// Tomislav-RetCtx: baggage the SDK keeps beside the span first (runtime/core/backend/
-	// span_baggage.go), then the span's "__bag." attributes as always (they take precedence).
+	// Baggage the SDK keeps beside the span first, then the span's "__bag." attributes, which take
+	// precedence.
 	backend.AppendSpanBaggage(span, baggage)
 	if rwSpan, ok := span.({{$sdktrace}}.ReadWriteSpan); ok {
 		for _, attr := range rwSpan.Attributes() {
 			if backend.IsReverseBaggageKey(attr.Key) {
-				continue // Tomislav-RetCtx: reverse context travels on the RPC response only.
+				continue // reverse context travels on the RPC response only.
 			}
 			if strings.HasPrefix(string(attr.Key), "__bag.") {
 				key := strings.TrimPrefix(string(attr.Key), "__bag.")
@@ -848,7 +845,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 		ctx = backend.SetBaggageInContext(ctx, baggage)
 	}
 
-	// Tomislav-RetCtx: each request owns a mutex-protected return accumulator.
+	// Each request owns a mutex-protected return accumulator.
 	ctx = backend.WithRetMerge(ctx)
 
 	{{RetVars $f "err"}} = handler.Service.{{$f.Name}}({{ArgVars $f "ctx"}})
@@ -856,18 +853,18 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 		span.RecordError(err)
 	}
 
-	// Tomislav-RetCtx: finalize merged returns after child/event counts settle.
+	// Finalize merged returns after child/event counts settle.
 	// This server spends one reverse hop; fan-in itself spends none.
 	// Deferred End exports the span with the SDK's completed decision.
 	if backend.ReverseTrussEnabled() {
 		retCtx = backend.MergedChildren(ctx)
-		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, 0); prepared { // Tomislav-RetCtx: vanilla sets no child attributes: 0 children, as before
+		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, 0); prepared { // vanilla sets no child attributes: 0 children
 			retCtx = out
 		}
-		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // Tomislav-RetCtx: the only form a service sends
+		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // the only form a service sends
 			backend.InvariantBroken("the reverse context sent back is a packed envelope", "first byte=", retCtx[0])
 		}
-		// Tomislav-RetCtx: raw in the process; the response field needs text.
+		// Raw in the process; the response field needs text.
 		retCtx = backend.RetCtxText(retCtx)
 	}
 	return
@@ -906,8 +903,8 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Sampling-aware fast path: compact "U:" carrier = head-unsampled upstream ->
 	// skip JSON deserialize/baggage/span; restore remote ctx and call the service.
 	if len(traceCtx) >= 50 && traceCtx[0:2] == "U:" {
-		// Tomislav-RetCtx: invariants (runtime/core/backend/invariant.go): only a traced caller writes
-		// this carrier, "U:" and 32 + 16 hex digits naming a valid trace and span.
+		// Only a traced caller writes this carrier:
+		// "U:" and 32 + 16 hex digits naming a valid trace and span.
 		if len(traceCtx) != 50 {
 			backend.InvariantBroken("an unsampled carrier is U: and 48 hex digits", "length=", len(traceCtx))
 		}
@@ -922,10 +919,10 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 		return
 	}
 	var baggage map[string]string
-	var callerTraceID trace.TraceID // Tomislav-RetCtx: the trace the server span must continue
+	var callerTraceID trace.TraceID // the trace the server span must continue
 	if traceCtx != "" {
 		span_ctx_config, upstreamBaggage, carrierErr := backend.GetSpanContext(traceCtx)
-		if carrierErr != nil { // Tomislav-RetCtx: only a traced caller writes this carrier
+		if carrierErr != nil { // only a traced caller writes this carrier
 			backend.InvariantBroken("the forward carrier decodes", carrierErr)
 		}
 		span_ctx := trace.NewSpanContext(span_ctx_config)
@@ -947,7 +944,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
 	// CGPB HA / SB ordinals are never emitted).
 	if baggage != nil {
-		// Tomislav-RetCtx: a bridge caller always sends its child ordinal, an integer >= 1.
+		// A bridge caller always sends its child ordinal, an integer >= 1.
 		sv, ok := baggage["__seq"]
 		if !ok {
 			backend.InvariantBroken("a bridge caller sends its child ordinal (__seq)", "kind=cgpb")
@@ -960,13 +957,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	}
 
 	tp, tpErr := handler.CollClient.GetTracerProvider(ctx)
-	if tpErr != nil { // Tomislav-RetCtx: invariant (runtime/core/backend/invariant.go)
+	if tpErr != nil {
 		backend.InvariantBroken("the collector client provides a tracer provider", tpErr)
 	}
 	tr := tp.Tracer("{{$service}}")
 	ctx, span := tr.Start(ctx, "{{$service}}Server_{{$f.Name}}", trace.WithSpanKind(trace.SpanKindServer))
 	defer span.End()
-	// Tomislav-RetCtx: the span the SDK started is valid and continues the caller's trace.
+	// The span the SDK started is valid and continues the caller's trace.
 	if sc := span.SpanContext(); !sc.IsValid() || (traceCtx != "" && sc.TraceID() != callerTraceID) {
 		backend.InvariantBroken("the server span is valid and continues the caller's trace", "caller=", callerTraceID.String(), " span=", sc.TraceID().String())
 	}
@@ -975,13 +972,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	if baggage == nil {
 		baggage = make(map[string]string)
 	}
-	// Tomislav-RetCtx: baggage the SDK keeps beside the span first (runtime/core/backend/
-	// span_baggage.go), then the span's "__bag." attributes as always (they take precedence).
+	// Baggage the SDK keeps beside the span first, then the span's "__bag." attributes, which take
+	// precedence.
 	backend.AppendSpanBaggage(span, baggage)
 	if rwSpan, ok := span.({{$sdktrace}}.ReadWriteSpan); ok {
 		for _, attr := range rwSpan.Attributes() {
 			if backend.IsReverseBaggageKey(attr.Key) {
-				continue // Tomislav-RetCtx: reverse context travels on the RPC response only.
+				continue // reverse context travels on the RPC response only.
 			}
 			if strings.HasPrefix(string(attr.Key), "__bag.") {
 				key := strings.TrimPrefix(string(attr.Key), "__bag.")
@@ -1009,7 +1006,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	childCount := atomic.Uint64{}
 	ctx = context.WithValue(ctx, "childCount", &childCount)
 
-	// Tomislav-RetCtx: each request owns a mutex-protected return accumulator.
+	// Each request owns a mutex-protected return accumulator.
 	ctx = backend.WithRetMerge(ctx)
 	
 	{{RetVars $f "err"}} = handler.Service.{{$f.Name}}({{ArgVars $f "ctx"}})
@@ -1019,18 +1016,18 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 
 	span.SetAttributes(attribute.Int("childCount", int(childCount.Load())))
 
-	// Tomislav-RetCtx: finalize merged returns after child/event counts settle.
+	// Finalize merged returns after child/event counts settle.
 	// This server spends one reverse hop; fan-in itself spends none.
 	// Deferred End exports the span with the SDK's completed decision.
 	if backend.ReverseTrussEnabled() {
 		retCtx = backend.MergedChildren(ctx)
-		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, int(childCount.Load())); prepared { // Tomislav-RetCtx: the child count, not read back off the span
+		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, int(childCount.Load())); prepared { // the child count, not read back off the span
 			retCtx = out
 		}
-		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // Tomislav-RetCtx: the only form a service sends
+		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // the only form a service sends
 			backend.InvariantBroken("the reverse context sent back is a packed envelope", "first byte=", retCtx[0])
 		}
-		// Tomislav-RetCtx: raw in the process; the response field needs text.
+		// Raw in the process; the response field needs text.
 		retCtx = backend.RetCtxText(retCtx)
 	}
 	return
@@ -1069,8 +1066,8 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// Sampling-aware fast path: compact "U:" carrier = head-unsampled upstream ->
 	// skip JSON deserialize/baggage/span; restore remote ctx and call the service.
 	if len(traceCtx) >= 50 && traceCtx[0:2] == "U:" {
-		// Tomislav-RetCtx: invariants (runtime/core/backend/invariant.go): only a traced caller writes
-		// this carrier, "U:" and 32 + 16 hex digits naming a valid trace and span.
+		// Only a traced caller writes this carrier:
+		// "U:" and 32 + 16 hex digits naming a valid trace and span.
 		if len(traceCtx) != 50 {
 			backend.InvariantBroken("an unsampled carrier is U: and 48 hex digits", "length=", len(traceCtx))
 		}
@@ -1085,10 +1082,10 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 		return
 	}
 	var baggage map[string]string
-	var callerTraceID trace.TraceID // Tomislav-RetCtx: the trace the server span must continue
+	var callerTraceID trace.TraceID // the trace the server span must continue
 	if traceCtx != "" {
 		span_ctx_config, upstreamBaggage, carrierErr := backend.GetSpanContext(traceCtx)
-		if carrierErr != nil { // Tomislav-RetCtx: only a traced caller writes this carrier
+		if carrierErr != nil { // only a traced caller writes this carrier
 			backend.InvariantBroken("the forward carrier decodes", carrierErr)
 		}
 		span_ctx := trace.NewSpanContext(span_ctx_config)
@@ -1110,7 +1107,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	// processor's OnStart reads the correct seqNum (else it defaults to 0 and
 	// CGPB HA / SB ordinals are never emitted).
 	if baggage != nil {
-		// Tomislav-RetCtx: a bridge caller always sends its child ordinal, an integer >= 1.
+		// A bridge caller always sends its child ordinal, an integer >= 1.
 		sv, ok := baggage["__seq"]
 		if !ok {
 			backend.InvariantBroken("a bridge caller sends its child ordinal (__seq)", "kind=pb")
@@ -1123,13 +1120,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	}
 
 	tp, tpErr := handler.CollClient.GetTracerProvider(ctx)
-	if tpErr != nil { // Tomislav-RetCtx: invariant (runtime/core/backend/invariant.go)
+	if tpErr != nil {
 		backend.InvariantBroken("the collector client provides a tracer provider", tpErr)
 	}
 	tr := tp.Tracer("{{$service}}")
 	ctx, span := tr.Start(ctx, "{{$service}}Server_{{$f.Name}}", trace.WithSpanKind(trace.SpanKindServer))
 	defer span.End()
-	// Tomislav-RetCtx: the span the SDK started is valid and continues the caller's trace.
+	// The span the SDK started is valid and continues the caller's trace.
 	if sc := span.SpanContext(); !sc.IsValid() || (traceCtx != "" && sc.TraceID() != callerTraceID) {
 		backend.InvariantBroken("the server span is valid and continues the caller's trace", "caller=", callerTraceID.String(), " span=", sc.TraceID().String())
 	}
@@ -1138,13 +1135,13 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	if baggage == nil {
 		baggage = make(map[string]string)
 	}
-	// Tomislav-RetCtx: baggage the SDK keeps beside the span first (runtime/core/backend/
-	// span_baggage.go), then the span's "__bag." attributes as always (they take precedence).
+	// Baggage the SDK keeps beside the span first, then the span's "__bag." attributes, which take
+	// precedence.
 	backend.AppendSpanBaggage(span, baggage)
 	if rwSpan, ok := span.({{$sdktrace}}.ReadWriteSpan); ok {
 		for _, attr := range rwSpan.Attributes() {
 			if backend.IsReverseBaggageKey(attr.Key) {
-				continue // Tomislav-RetCtx: reverse context travels on the RPC response only.
+				continue // reverse context travels on the RPC response only.
 			}
 			if strings.HasPrefix(string(attr.Key), "__bag.") {
 				key := strings.TrimPrefix(string(attr.Key), "__bag.")
@@ -1172,7 +1169,7 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 	childCount := atomic.Uint64{}
 	ctx = context.WithValue(ctx, "childCount", &childCount)
 
-	// Tomislav-RetCtx: each request owns a mutex-protected return accumulator.
+	// Each request owns a mutex-protected return accumulator.
 	ctx = backend.WithRetMerge(ctx)
 	
 	{{RetVars $f "err"}} = handler.Service.{{$f.Name}}({{ArgVars $f "ctx"}})
@@ -1182,18 +1179,18 @@ func (handler *{{$receiver}}) {{$f.Name -}} ({{ArgVarsAndTypes $f "ctx context.C
 
 	span.SetAttributes(attribute.Bool("hasChildren", int(childCount.Load()) > 0))
 
-	// Tomislav-RetCtx: finalize merged returns after child/event counts settle.
+	// Finalize merged returns after child/event counts settle.
 	// This server spends one reverse hop; fan-in itself spends none.
 	// Deferred End exports the span with the SDK's completed decision.
 	if backend.ReverseTrussEnabled() {
 		retCtx = backend.MergedChildren(ctx)
-		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, int(childCount.Load())); prepared { // Tomislav-RetCtx: the child count, not read back off the span
+		if out, prepared := backend.PrepareServerCheckpoint(tp, span, retCtx, int(childCount.Load())); prepared { // the child count, not read back off the span
 			retCtx = out
 		}
-		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // Tomislav-RetCtx: the only form a service sends
+		if retCtx != "" && !backend.IsPackedRetCtx(retCtx) { // the only form a service sends
 			backend.InvariantBroken("the reverse context sent back is a packed envelope", "first byte=", retCtx[0])
 		}
-		// Tomislav-RetCtx: raw in the process; the response field needs text.
+		// Raw in the process; the response field needs text.
 		retCtx = backend.RetCtxText(retCtx)
 	}
 	return

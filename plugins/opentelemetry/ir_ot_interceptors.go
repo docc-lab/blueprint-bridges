@@ -10,7 +10,7 @@ import (
 	"github.com/blueprint-uservices/blueprint/plugins/http"
 )
 
-// Tomislav-RetCtx: IR nodes for tracing gRPC services with interceptors (see [InstrumentGRPC]).
+// IR nodes for tracing gRPC services with interceptors (see [InstrumentGRPC]).
 //
 // Unlike the wrapper nodes, these generate no code.  The interceptors live in the runtime package
 // runtime/plugins/opentelemetry/interceptors; these nodes only declare the call that creates them,
