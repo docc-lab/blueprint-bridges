@@ -228,7 +228,11 @@ func packEndGroup(out []byte, ends []int, bound int) []byte {
 	}
 	out = binary.AppendUvarint(out, uint64(len(ends))<<1)
 	for _, e := range ends {
-		out = binary.AppendUvarint(out, uint64(maxInt(e, 0)))
+		if e < 1 { // Tomislav-RetCtx: invariant (invariants.go): ordinals start at 1 (not always <= bound:
+			// a later sibling can end before an earlier one starts)
+			brokenInt("an end event is a child ordinal >= 1", "ordinal", e, 1)
+		}
+		out = binary.AppendUvarint(out, uint64(e))
 	}
 	return out
 }

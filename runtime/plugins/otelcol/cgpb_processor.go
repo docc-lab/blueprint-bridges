@@ -519,6 +519,9 @@ func (p *CallGraphBridgeProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	// serves classification and conversion; the window's wire state is taken (and freed) here.
 	attrs := s.Attributes()
 	w := bridgeWires.take(s.SpanContext().SpanID())
+	if (w != nil) != p.checkpointRange.enabled() { // Tomislav-RetCtx: invariant (invariants.go)
+		brokenRule("a bridge span has a wire entry exactly when the window is ranged (stored at OnStart)")
+	}
 	p.routeToPipeline(s, attrs, w, pathCheckpoint(s.SpanKind(), attrs, w))
 }
 

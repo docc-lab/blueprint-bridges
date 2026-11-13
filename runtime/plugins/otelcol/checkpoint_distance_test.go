@@ -65,6 +65,9 @@ func ttlChildContext(t *testing.T, span trace.Span) context.Context {
 		t.Fatal(err)
 	}
 	ctx := trace.ContextWithRemoteSpanContext(context.Background(), span.SpanContext())
+	// Tomislav-RetCtx: the server instrumentation also puts the caller's child ordinal on the
+	// context (from __seq, always >= 1; the processors check it): each span here is a first child.
+	ctx = context.WithValue(ctx, "seqNum", 1)
 	return backend.SetBaggageInContext(ctx, decoded)
 }
 

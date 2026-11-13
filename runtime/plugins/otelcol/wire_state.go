@@ -78,6 +78,10 @@ func (t *wireTable) shard(id trace.SpanID) *wireTableShard {
 func (t *wireTable) store(id trace.SpanID, v *bridgeWire) {
 	s := t.shard(id)
 	s.mu.Lock()
+	if _, dup := s.m[id]; dup { // Tomislav-RetCtx: invariant: stored once per span (OnStart), taken at OnEnd
+		s.mu.Unlock()
+		brokenRule("a span's wire entry is stored once") // invariants.go
+	}
 	s.m[id] = v
 	s.mu.Unlock()
 }

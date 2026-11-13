@@ -113,24 +113,33 @@ async def register(addr, nodes, limit=200):
 
 
 async def follow(addr, edges, limit=200):
-  idx = 0
-  tasks = []
+  # Tomislav-RetCtx (2026-10-30): follows that fail (HTTP 500 right after a deploy, before the social-graph path is
+  # warm: 9,830 of 37,624 on the SB variant, 882 on nt) are retried in up to three further passes at a quarter of
+  # the parallelism; the summary counts each follow once by its final outcome.
+  pairs = []
+  for edge in edges:
+    pairs.append((edge[0], edge[1]))
+    pairs.append((edge[1], edge[0]))
   conn = aiohttp.TCPConnector(limit=limit)
   async with aiohttp.ClientSession(connector=conn) as session:
     print('Adding follows...')
-    for edge in edges:
-      task = asyncio.ensure_future(
-          upload_follow(session, addr, edge[0], edge[1]))
-      tasks.append(task)
-      task = asyncio.ensure_future(
-          upload_follow(session, addr, edge[1], edge[0]))
-      tasks.append(task)
-      idx += 1
-      if idx % limit == 0:
-        _ = await asyncio.gather(*tasks)
-        print(idx)
-    results = await asyncio.gather(*tasks)
-    printResults(results)
+    final = {}
+    pending = list(range(len(pairs)))
+    for attempt in range(4):
+      batch = limit if attempt == 0 else max(1, limit // 4)
+      for start in range(0, len(pending), batch):
+        chunk = pending[start:start + batch]
+        results = await asyncio.gather(*[upload_follow(session, addr, pairs[k][0], pairs[k][1]) for k in chunk])
+        for k, r in zip(chunk, results):
+          final[k] = r
+        if attempt == 0 and (start + batch) % (limit * 1) == 0:
+          print(start + batch)
+      pending = [k for k in pending if final[k] != 'Success']
+      if not pending:
+        break
+      print('retrying', len(pending), 'failed follows (pass', attempt + 2, ')')
+      await asyncio.sleep(2)
+    printResults([final[k] for k in range(len(pairs))])
 
 
 async def compose(addr, nodes, limit=200):

@@ -164,7 +164,9 @@ def snapshot(namespace, variant, directory):
                 # Tomislav-RetCtx (2026-09-25): RETCTX_LOG_TAIL (default 2000; -1 = whole log) -- per-second SDK / agent
                 # counters over a whole 600 s bursty point need more than 2000 lines (error lines flood the tail)
                 jobs.append((pool.submit(kube, namespace, 'logs', name, f"--tail={os.environ.get('RETCTX_LOG_TAIL', '2000')}"), 'logs', name))
-        for i in range(1, 10):
+        # Tomislav-RetCtx (2026-10-30): node-10 and node-11 too (fit_cluster_8core_sn places usertimeline-db, urlshorten-db
+        # and userid there; the hotel fit uses node-10..14 for stores)
+        for i in range(1, 15):
             node = f'node-{i}'
             jobs.append((pool.submit(kube, namespace, 'get', '--raw',
                          f'/api/v1/nodes/{node}/proxy/stats/summary'), 'node', node))

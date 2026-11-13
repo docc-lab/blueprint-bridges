@@ -10,6 +10,7 @@ a 500..14000 step-500 ramp with a connection cap, passthrough collectors at
 import argparse
 import hashlib
 import json
+import urllib.error
 import retctx_wire
 import math
 from pathlib import Path
@@ -17,17 +18,20 @@ import time
 import urllib.request
 
 from prepare_dsb_sn_e2e import REPO, write_json
-from prepare_dsb_sn_nw import BRIDGES, COLLECTOR_PROFILES, COLLECTOR_RESOURCES, DISCOVERY, GATEWAY, cpu_count
+from prepare_dsb_sn_nw import BRIDGES, COLLECTOR_PROFILES, COLLECTOR_RESOURCES, DISCOVERY, GATEWAY, app_gomaxprocs, cpu_count
 from dsb_apps import APPS, app_name, app_of, entry_url  # Tomislav-RetCtx: per-application constants
 import dsb_hotel_seed  # Tomislav-RetCtx (2026-10-29): larger hotel dataset seeded before the services start
-from run_dsb_sn_e2e import (now, kube, get_http, snapshot, counter_deltas, run_wrk, teardown, ready,
+from run_dsb_sn_e2e import (now, kube, get_http, snapshot, counter_deltas, run_wrk, teardown, ready, SEED,
                             sample_traces, capture_traces, settle_trace_samples)
 
 CONNECTION_CAP = 2500
 
 
 def connections_for(rate, cap=CONNECTION_CAP):
-    return min(max(1, math.ceil(rate * rate / 20000)), cap)
+    # Tomislav-RetCtx (2026-10-29): floor of 10 req/s per connection (100 ms budget per request) for
+    # the 100-step ramps from 100 req/s; rate^2/20000 alone gives 1 connection at 100 req/s, which
+    # a 50-100 ms request would starve.  Identical to the old formula at and above 2,000 req/s.
+    return min(max(1, math.ceil(rate * rate / 20000), math.ceil(rate / 10)), cap)
 
 
 def check_sources(root):
@@ -215,6 +219,7 @@ def verify_deployment(case, directory):
     pods = ready(namespace, variant, case.get('expected_pods', 33))  # 25 deployments + 8 collectors (34 with clickhouse)
     write_json(directory / 'ready-pods.json', {'items': pods})
     tuning = case.get('backend_tuning')
+    gomaxprocs_rule = json.loads((Path(case['case']) / 'build-complete.json').read_text()).get('app_gomaxprocs')
     collectors = [p for p in pods if p['metadata']['name'].startswith('otelcol-')]
     assert {p['spec']['nodeName'] for p in collectors} == {f'node-{i}' for i in range(1, 9)}
     for pod in pods:
@@ -223,7 +228,13 @@ def verify_deployment(case, directory):
             assert '@sha256:' in container['image'], name
             env = {e['name']: e.get('value') for e in container.get('env', [])}
             if '-service-' in name:
-                assert env['GOMAXPROCS'] == '8', name
+                # Tomislav-RetCtx (user 2026-11-08): roots fitted since then run GOMAXPROCS = ceil(CPU limit), at least
+                # 2 (fit_cluster_8core*.py records app_gomaxprocs = 'cpu-limit'); older roots keep prepare's 8.
+                if gomaxprocs_rule == 'cpu-limit':
+                    assert env['GOMAXPROCS'] == str(app_gomaxprocs(container['resources']['limits']['cpu'])), \
+                        (name, env['GOMAXPROCS'], container['resources']['limits']['cpu'])
+                else:
+                    assert gomaxprocs_rule is None and env['GOMAXPROCS'] == '8', (name, gomaxprocs_rule)
                 # Tomislav-RetCtx: SDK retry policy exactly as the case records it (absent = off).
                 assert env.get('BRIDGES_RETRY') == case.get('sdk_retry_mode'), (name, env.get('BRIDGES_RETRY'))
                 if kind == 'nt':
@@ -293,7 +304,8 @@ def check_initialized(case, directory):
         import re, subprocess, sys as _sys
         log = directory / 'seed.log'
         with log.open('w') as out:
-            subprocess.run([_sys.executable, '/users/tomislav/blueprint-docc-mod/examples/dsb_sn/scripts/init_social_graph.py',
+            # Tomislav-RetCtx (2026-10-30): the seed script of THIS checkout (run_dsb_sn_e2e.SEED), not the main checkout's
+            subprocess.run([_sys.executable, str(SEED),
                             '--ip', '10.10.1.1', '--port', str(app['nodeport']), '--limit', '200'],
                            cwd='/users/tomislav/DeathStarBench/socialNetwork', timeout=900, stdout=out, stderr=subprocess.STDOUT, check=True)
         text = log.read_text()
@@ -346,9 +358,24 @@ def check_initialized(case, directory):
     if app_name(case) == 'hotel':
         url = (entry_url(app) + '/SearchHandler?inDate=2015-04-09&outDate=2015-04-10'
                '&lat=37.7867&lon=-122.4112')  # hotel 1's coordinates
-        body = json.loads(get_http(url, timeout=30))
+        # Tomislav-RetCtx (2026-10-29): with a seeding Job the services sit behind wait-seed init
+        # containers and all become Ready within the same few seconds; the first probe can reach
+        # the frontend before its first gRPC dial to the last-started service succeeds, which the
+        # DSB frontend answers with HTTP 500 (seen once: retctx-hotelds-2k-20261029T185634Z, probe
+        # 13 s after reserv-service logged "running", the same request answered 200 a minute
+        # later).  Bounded retry, 5 s apart for at most 90 s; the attempt count is recorded.
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                body = json.loads(get_http(url, timeout=30))
+                break
+            except urllib.error.HTTPError as error:
+                if error.code != 500 or attempts >= 18:
+                    raise
+                time.sleep(5)
         hotels = body.get('Ret0') or []
-        result['probe'] = {'url': url, 'hotels_returned': len(hotels),
+        result['probe'] = {'url': url, 'hotels_returned': len(hotels), 'attempts': attempts,
                            'ids': sorted(str(h.get('ID', '?')) for h in hotels)}
         # Tomislav-RetCtx: pre-fill the geo service's latitude cache one request at a time.
         # github.com/hailocab/go-geoindex (the DSB geo service's index) memoizes the length of a
@@ -473,6 +500,167 @@ def smoke_checks(case, point, after):
     return summary
 
 
+# Tomislav-RetCtx (user 2026-11-05; database names upstream's since 2026-11-06): Social Network app 'snbd'. STATE_QUERIES record the data the app
+# accumulates, at the end of the pre-fill, of every probe and of every ramp point, so a drift is measured rather than
+# assumed: user-timeline documents (posts per document min/mean/max, average BSON size), posts and shortened URLs
+# stored, used_memory of the three Redis caches that grow with posts.
+STATE_MONGO = {
+    'usertimeline-db': ('usertimeline',
+                        'var t=db.getSiblingDB("user-timeline")["user-timeline"];var a=t.aggregate([{$project:{n:{$size:'
+                        '{$ifNull:["$posts",[]]}}}},{$group:{_id:null,docs:{$sum:1},min:{$min:"$n"},mean:{$avg:"$n"},'
+                        'max:{$max:"$n"}}}]).toArray();var s=t.stats();print(JSON.stringify({posts_per_doc:a[0]||null,'
+                        'avg_obj_size:s.avgObjSize||0,data_bytes:s.size||0,indexes:t.getIndexes().map(function(i){'
+                        'return i.name})}))'),
+    'post-db': ('post', 'var t=db.getSiblingDB("post").post;print(JSON.stringify({count:t.count(),'
+                        'indexes:t.getIndexes().map(function(i){return i.name})}))'),
+    'urlshorten-db': ('urlshorten', 'var t=db.getSiblingDB("url-shorten")["url-shorten"];print(JSON.stringify({'
+                      'count:t.count(),indexes:t.getIndexes().map(function(i){return i.name})}))'),
+}
+# Tomislav-RetCtx (2026-11-06): as upstream DeathStarBench, the social-graph, user-timeline and home-timeline caches are
+# Redis and the user and post caches memcached (bash /dev/tcp sends memcached's stats command: its image has no client).
+STATE_REDIS = ('hometimeline-cache', 'usertimeline-cache', 'social-cache')
+STATE_MEMCACHED = ('post-cache', 'user-cache')
+MEMCACHED_STATS = 'exec 3<>/dev/tcp/127.0.0.1/11211; printf "stats\\r\\nquit\\r\\n" >&3; cat <&3'
+
+
+def app_state(case, path, strict=False):
+    namespace, variant = case['namespace'], case['variant']
+    pods = json.loads(kube(namespace, 'get', 'pods', '-l', f'retctx-e2e={variant}', '-o', 'json'))['items']
+    by_base = {p['metadata']['name'].split('-' + variant + '-ctr')[0]: p['metadata']['name'] for p in pods}
+    state = {'at': now(), 'errors': []}
+    for base, (key, script) in STATE_MONGO.items():
+        try:
+            out = kube(namespace, 'exec', by_base[base], '--', 'mongo', '--quiet', '--eval', script, timeout=60)
+            state[key] = json.loads(out.strip().splitlines()[-1])
+        except Exception as exc:  # noqa: BLE001 - recorded; strict callers re-raise below
+            state['errors'].append(f'{base}: {exc!r}')
+    for base in STATE_REDIS:
+        try:
+            out = kube(namespace, 'exec', by_base[base], '--', 'redis-cli', 'INFO', 'all', timeout=60)
+            fields = dict(line.strip().split(':', 1) for line in out.splitlines() if ':' in line)
+            state.setdefault('redis_used_memory', {})[base] = int(fields['used_memory'])
+            # Tomislav-RetCtx (2026-11-06): RDB snapshot activity, to line the ramp's bad points up with snapshots
+            state.setdefault('redis_persistence', {})[base] = {
+                k: int(fields[k]) for k in ('total_forks', 'latest_fork_usec', 'rdb_bgsave_in_progress',
+                                            'rdb_last_bgsave_time_sec', 'rdb_changes_since_last_save',
+                                            'rdb_last_save_time') if k in fields}
+        except Exception as exc:  # noqa: BLE001
+            state['errors'].append(f'{base}: {exc!r}')
+    for base in STATE_MEMCACHED:
+        try:
+            out = kube(namespace, 'exec', by_base[base], '--', 'bash', '-c', MEMCACHED_STATS, timeout=60)
+            stats = dict(line.split()[1:3] for line in out.splitlines() if line.startswith('STAT '))
+            state.setdefault('memcached', {})[base] = {k: int(stats[k]) for k in ('bytes', 'curr_items', 'evictions', 'limit_maxbytes')}
+        except Exception as exc:  # noqa: BLE001
+            state['errors'].append(f'{base}: {exc!r}')
+    write_json(path, state)
+    # Tomislav-RetCtx (2026-11-06): only the user-timeline documents decide whether the pre-fill reached its target; a
+    # cache statistic that cannot be read is recorded, not fatal.
+    assert not (strict and any(e.startswith('usertimeline-db') for e in state['errors'])), state['errors']
+    return state
+
+
+def configure_redis(case, directory, save):
+    """Tomislav-RetCtx (user 2026-11-06): sets the Redis caches' RDB snapshot schedule (CONFIG SET save; '' = no
+    snapshots) right after the deploy, before seeding, and records what each cache reports afterwards."""
+    namespace, variant = case['namespace'], case['variant']
+    pods = json.loads(kube(namespace, 'get', 'pods', '-l', f'retctx-e2e={variant}', '-o', 'json'))['items']
+    by_base = {p['metadata']['name'].split('-' + variant + '-ctr')[0]: p['metadata']['name'] for p in pods}
+    applied = {'at': now(), 'requested_save': save, 'caches': {}}
+    for base in STATE_REDIS:
+        assert kube(namespace, 'exec', by_base[base], '--', 'redis-cli', 'CONFIG', 'SET', 'save', save,
+                    timeout=60).strip() == 'OK', base
+        out = kube(namespace, 'exec', by_base[base], '--', 'redis-cli', 'CONFIG', 'GET', 'save', timeout=60)
+        applied['caches'][base] = out.strip().splitlines()[1:] or ['']
+    write_json(directory / 'redis-config.json', applied)
+
+
+def measure_point(case, point, rate, seconds, seed, plan, **extra):
+    """One fixed-rate point measured like a ramp point (telemetry snapshot before and after, result.json)."""
+    point.mkdir(parents=True)
+    before = snapshot(case['namespace'], case['variant'], point / 'before')
+    result = run_wrk(point, rate, seconds, seed, connections=connections_for(rate), app=app_name(case),
+                     workload=plan.get('workload'))
+    after = snapshot(case['namespace'], case['variant'], point / 'after')
+    result['collector_deltas'], result['counter_resets'] = counter_deltas(before, after)
+    result['snapshot_errors'] = before['errors'] + after['errors']
+    result['restarts_changed'] = before['restarts'] != after['restarts']
+    result['connection_cap'] = CONNECTION_CAP
+    result.update(kind=case['kind'], case=case['name'], sample_ratio=case['sample_ratio'], **extra)
+    write_json(point / 'result.json', result)
+    return result
+
+
+def prefill(case, directory, seed):
+    """Tomislav-RetCtx (user 2026-11-05): bounded Social Network: ComposePost (the app's default compose-post.lua, whatever
+    the plan's workload) at cfg['rate'] for users x posts_per_user x margin posts, then verify on the user-timeline
+    documents that every posting user has exactly one document holding at least posts_per_user (the cap) posts; up to
+    max_top_ups further fills of top_up_seconds if not. Raises if the steady state is not reached."""
+    cfg = app_of(case)['prefill']
+    seconds = math.ceil(cfg['users'] * cfg['posts_per_user'] * cfg['margin'] / cfg['rate'])
+    fills = []
+    for attempt in range(cfg['max_top_ups'] + 1):
+        sub = directory / ('prefill' if attempt == 0 else f'prefill-topup-{attempt}')
+        length = seconds if attempt == 0 else cfg['top_up_seconds']
+        result = run_wrk(sub, cfg['rate'], length, seed + 900 + attempt, connections=connections_for(cfg['rate']),
+                         app=app_name(case), workload=None)
+        state = app_state(case, sub / 'app-state.json', strict=True)
+        per_doc = state['usertimeline']['posts_per_doc'] or {}
+        fills.append({'directory': sub.name, 'rate': cfg['rate'], 'seconds': length,
+                      'completed_rps': result.get('completed_rps'), 'non_2xx_3xx': result.get('non_2xx_3xx'),
+                      'socket_errors': result.get('socket_errors'), 'posts_per_doc': per_doc})
+        if per_doc.get('docs') == cfg['users'] and per_doc.get('min', 0) >= cfg['posts_per_user']:
+            write_json(directory / 'prefill.json', {'reached': True, 'config': cfg, 'fills': fills, 'at': now()})
+            return fills
+        assert per_doc.get('docs', 0) <= cfg['users'], f'prefill: duplicate timeline documents {per_doc}'
+    write_json(directory / 'prefill.json', {'reached': False, 'config': cfg, 'fills': fills, 'at': now()})
+    raise AssertionError(f'prefill: not every user reached {cfg["posts_per_user"]} posts: {fills[-1]}')
+
+
+def probe(case, directory, plan, seed, tag):
+    """Tomislav-RetCtx (user 2026-11-05): the fixed-rate probe point (plan['probe']) that opens ('pre') and closes
+    ('post') every ramp: CPU per request at one sub-knee rate for every kind, and pre vs post = the drift check."""
+    cfg = plan['probe']
+    offset = {'pre': 1, 'post': 2}[tag]
+    result = measure_point(case, directory / f'probe-{tag}', cfg['rate'], cfg['seconds'], seed + 500000 + offset, plan,
+                           probe=tag)
+    if app_of(case).get('prefill'):
+        app_state(case, directory / f'probe-{tag}' / 'app-state.json')
+    return result
+
+
+def setup(case, directory, plan, seed, mode, state, status_path):
+    """Deploy one case into directory and bring it to the measured state: deploy (verified), Redis snapshot schedule,
+    then (run mode) the settle, the asserted warm-up and the prefill. Tomislav-RetCtx (2026-11-11): a function so that
+    plan['fresh_points'] repeats it, unchanged, before every ramp point."""
+    deploy(case, directory)
+    if plan.get('redis_save') is not None:
+        configure_redis(case, directory, plan['redis_save'])
+    if mode == 'run':
+        state.update(stage='warmup', updated=now()); write_json(status_path, state)
+        # Tomislav-RetCtx (2026-10-30): a 20 s settle at 10 req/s before the asserted warm-up. The first
+        # requests after a deploy hit cold paths (connection pools, first queries); on the R710 cluster the
+        # Social Network's first ComposePosts exceeded their gRPC deadline (10 of 9,991 warm-up requests, all
+        # in its first 2 s). Errors here are recorded in warmup-settle/result.json, not asserted; wrk2's
+        # 10 s calibration can leave the settle without recorded samples (hotel at 65 ms mean latency),
+        # which is not a failure either.
+        try:
+            run_wrk(directory / 'warmup-settle', 10, 20, seed, connections=plan['warmup_connections'],
+                    app=app_name(case), workload=plan.get('workload'))
+        except ValueError as exc:
+            write_json(directory / 'warmup-settle' / 'unparsed.json', {'error': str(exc), 'at': now()})
+        warm = run_wrk(directory / 'warmup', plan['warmup_rps'], plan['warmup_seconds'], seed,
+                       connections=plan['warmup_connections'], app=app_name(case), workload=plan.get('workload'))
+        assert warm['non_2xx_3xx'] == 0 and not any(warm['socket_errors'].values()), warm
+        if case.get('backend_tuning') and case['kind'] != 'nt' \
+                and case.get('collector_profile') != 'sink':
+            time.sleep(15)  # first refresh of the fresh index
+            verify_index(case, directory)
+        if app_of(case).get('prefill'):
+            state.update(stage='prefill', updated=now()); write_json(status_path, state)
+            prefill(case, directory, seed)
+
+
 def campaign(root, mode, skip_smoke=False):
     assert json.loads((root / 'image-build-status.json').read_text())['state'] == 'complete'
     plan = json.loads((root / 'plan.json').read_text())
@@ -508,16 +696,12 @@ def campaign(root, mode, skip_smoke=False):
             state = {'state': 'running', 'mode': mode, 'repetition': rep + 1, 'case': name, 'kind': case['kind'],
                      'sample_ratio': case['sample_ratio'], 'stage': 'deploy', 'updated': now()}
             write_json(status_path, state)
-            deploy(case, directory)
-            if mode == 'run':
-                state.update(stage='warmup', updated=now()); write_json(status_path, state)
-                warm = run_wrk(directory / 'warmup', plan['warmup_rps'], plan['warmup_seconds'], seed,
-                               connections=plan['warmup_connections'], app=app_name(case), workload=plan.get('workload'))
-                assert warm['non_2xx_3xx'] == 0 and not any(warm['socket_errors'].values()), warm
-                if case.get('backend_tuning') and case['kind'] != 'nt' \
-                        and case.get('collector_profile') != 'sink':
-                    time.sleep(15)  # first refresh of the fresh index
-                    verify_index(case, directory)
+            fresh = plan.get('fresh_points') if mode == 'run' else None
+            if not fresh:
+                setup(case, directory, plan, seed, mode, state, status_path)
+                if mode == 'run' and plan.get('probe'):
+                    state.update(stage='probe-pre', updated=now()); write_json(status_path, state)
+                    probe(case, directory, plan, seed, 'pre')
             rates = [10] if mode == 'smoke' else plan['ramp_rates']
             # Tomislav-RetCtx (user 2026-09-24): every kind stops at ITS OWN plateau (plan['plateau_stop']) and then
             # gets adaptive repeat windows in its knee region (plan['knee_windows']); both absent = the fixed ramp.
@@ -562,6 +746,8 @@ def campaign(root, mode, skip_smoke=False):
                     result.update(kind=case['kind'], case=name, sample_ratio=case['sample_ratio'], repetition=rep + 1,
                                   **({'pass': pass_no} if passes else {}))
                     write_json(point / 'result.json', result)
+                    if mode == 'run' and app_of(case).get('prefill'):
+                        app_state(case, point / 'app-state.json')
                     if mode == 'smoke':
                         assert result['non_2xx_3xx'] == 0 and not any(result['socket_errors'].values()), result
                         assert not result['snapshot_errors'], result['snapshot_errors']
@@ -587,7 +773,40 @@ def campaign(root, mode, skip_smoke=False):
             # Tomislav-RetCtx: first_pass > 1 tops up an existing n=1 sweep (its ramp is pass 1): this root's case
             # directory holds pass first_pass, pass-kk the rest, and every pass keeps the seed of its pass number.
             first = (passes or {}).get('first_pass', 1)
-            measured = climb(directory, rates, seed + 1000 * (first - 1), plateau, first)
+            if fresh:
+                # Tomislav-RetCtx (user 2026-11-11: "reset every single time and then run a warmup and then just the
+                # main rate"): every point gets its own deployment in <case>/setup-<rate> (setup(): teardown of the
+                # previous one, deploy, seeding, settle, warm-up, prefill), then fresh['warmup_seconds'] of wrk2 at the
+                # point's own rate and connection count (setup-<rate>/point-warmup, not measured), then the point
+                # itself exactly as climb() measures a ramp point (<case>/rate-<rate>, same seed for every point).
+                # The plateau stop is applied across the points as in climb().
+                measured, best, flat = [], 0.0, 0
+                for rate in rates:
+                    prep = directory / f'setup-{rate:05d}'
+                    prep.mkdir()
+                    state.update(stage='fresh-setup', offered_rps=rate, updated=now()); write_json(status_path, state)
+                    setup(case, prep, plan, seed, mode, state, status_path)
+                    state.update(stage='point-warmup', offered_rps=rate, updated=now()); write_json(status_path, state)
+                    generator = plan.get('generator')
+                    peak = rate * (generator or {}).get('peak_multiplier', 1.0)
+                    run_wrk(prep / 'point-warmup', rate, fresh['warmup_seconds'], seed + 3000,
+                            connections=connections_for(peak), generator=generator, app=app_name(case),
+                            workload=plan.get('workload'))
+                    if app_of(case).get('prefill'):
+                        app_state(case, prep / 'point-warmup' / 'app-state.json')
+                    result = climb(directory, [rate], seed, None, first)[0]
+                    measured.append(result)
+                    if plateau:
+                        if result['completed_rps'] >= best * (1 + plateau['min_gain']):
+                            best, flat = result['completed_rps'], 0
+                        else:
+                            flat += 1
+                        if flat >= plateau['flat_points']:
+                            write_json(directory / 'plateau-stop.json', {'stopped_after': rate, 'best_delivered': best,
+                                                                         'rule': plateau, 'at': now()})
+                            break
+            else:
+                measured = climb(directory, rates, seed + 1000 * (first - 1), plateau, first)
             points = len(measured)
             if passes:
                 grid = [r['offered_rps'] for r in measured]
@@ -600,6 +819,11 @@ def campaign(root, mode, skip_smoke=False):
                                                             'finished': now()})
             if mode == 'run' and plan.get('knee_windows') and measured:
                 knee_windows(case, directory, plan, measured, seed, state, status_path)
+            if mode == 'run' and plan.get('probe'):
+                state.update(stage='probe-cooldown', updated=now()); write_json(status_path, state)
+                time.sleep(plan['probe']['cooldown_seconds'])  # the ramp ended overloaded: let the backlog drain
+                state.update(stage='probe-post', updated=now()); write_json(status_path, state)
+                probe(case, directory, plan, seed, 'post')
             # Tomislav-RetCtx (user 2026-09-24): plan trace_capture False = no trace sampling in performance runs
             if mode == 'run' and case['kind'] != 'nt' and case.get('collector_profile') != 'sink' and plan.get('trace_capture', True):
                 state.update(stage='settle-trace-samples', updated=now()); write_json(status_path, state)

@@ -115,7 +115,6 @@ func TestEndGroupFallbacks(t *testing.T) {
 	}{
 		{nil, 0}, {nil, 5}, {[]int{1}, 1}, {[]int{3, 1}, 2}, // 3 exceeds bound -> plain
 		{[]int{2, 2}, 4},    // duplicate -> plain
-		{[]int{0, 1}, 4},    // zero ordinal -> plain
 		{[]int{5, 3, 1}, 5}, // lehmer
 	} {
 		packed := packEndGroup(nil, tc.ends, tc.bound)
@@ -127,6 +126,9 @@ func TestEndGroupFallbacks(t *testing.T) {
 			t.Fatalf("%v/%d: decoded %v", tc.ends, tc.bound, ends)
 		}
 	}
+	// Tomislav-RetCtx: a zero ordinal (children count from 1) used to be packed plain; it is a broken
+	// invariant now (invariants.go).
+	mustBreakInvariant(t, "zero ordinal", func() { packEndGroup(nil, []int{0, 1}, 4) })
 	// A group longer than its bound must not be decoded as Lehmer.
 	if _, _, ok := unpackEndGroup([]byte{5<<1 | 1, 0xFF}, 2); ok {
 		t.Fatal("accepted impossible Lehmer group")
@@ -346,7 +348,8 @@ func TestStructuralBridgeFixedDistance(t *testing.T) {
 		} else if ckpt != anchor || len(tail.ordinals) != depth%3 {
 			t.Fatalf("ordinary span at %d lost anchor or ordinals: %+v", depth, tail)
 		}
-		ctx = backend.SetBaggageInContext(trace.ContextWithSpanContext(context.Background(), span.SpanContext()),
+		// Tomislav-RetCtx: with the child ordinal the instrumentation always puts there (a first child).
+		ctx = backend.SetBaggageInContext(context.WithValue(trace.ContextWithSpanContext(context.Background(), span.SpanContext()), "seqNum", 1),
 			map[string]string{BaggageBRKey: baggageBR(span)})
 		span.End()
 	}

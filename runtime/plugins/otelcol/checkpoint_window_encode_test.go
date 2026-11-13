@@ -60,6 +60,15 @@ func TestEncodeWindowPayloadsMatchesFilterPath(t *testing.T) {
 		depth := rng.Intn(1 << uint(rng.Intn(20)))
 		isCheckpoint := rng.Intn(2) == 0
 		ttl := byte(rng.Intn(256))
+		if inherited != nil && len(inherited) != g.bytes {
+			// Tomislav-RetCtx: a parent Bloom of the wrong width cannot come out of
+			// unpackCheckpointWindowBR; the encoder now treats one as a broken invariant
+			// (invariants.go) instead of starting the window empty.
+			mustBreakInvariant(t, "wrong-width inherited Bloom", func() {
+				encodeWindowPayloads(r, depth, anchor, distance, inherited, ha, isCheckpoint, ttl, sid)
+			})
+			continue
+		}
 		we, ww := referenceWindowPayloads(r, depth, anchor, distance, inherited, ha, isCheckpoint, ttl, sid)
 		ge, gw := encodeWindowPayloads(r, depth, anchor, distance, inherited, ha, isCheckpoint, ttl, sid)
 		if !bytes.Equal(we, ge) || !bytes.Equal(ww, gw) {

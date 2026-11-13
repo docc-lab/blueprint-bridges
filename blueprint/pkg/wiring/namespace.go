@@ -107,6 +107,19 @@ type namespaceimpl struct {
 	ChildNamespaces map[string]Namespace // Child namespaces
 
 	stack []*WiringDef // Used when building; the stack of wiring defs currently being built
+
+	// Tomislav-RetCtx: forward references handed out to break dependency cycles, by the name they stand for.
+	Forwards map[string]ir.IRNode
+}
+
+// Tomislav-RetCtx: ForwardReferencer is implemented by a [NamespaceHandler] that can break dependency cycles. When a
+// node is requested while it is itself still being built (A's build asked for B and B's build asks for A),
+// ForwardReference returns a node to give the requester instead: one that stands for the node `name` and reaches it
+// at runtime, once it exists. resolve returns the node `name` and may only be called after the build completes (for
+// example during code generation). A namespace whose handler does not implement ForwardReferencer reports the cycle as
+// an error.
+type ForwardReferencer interface {
+	ForwardReference(name string, resolve func() (ir.IRNode, error)) (ir.IRNode, error)
 }
 
 // NamespaceHandler is an interface intended for use by any Blueprint plugin that wants to
@@ -163,11 +176,21 @@ func (namespace *namespaceimpl) get(name string, addEdge bool, dst any) error {
 		return err
 	}
 
-	// Track the defs being built
-	namespace.stack = append(namespace.stack, def)
-	defer func() {
-		namespace.stack = namespace.stack[:len(namespace.stack)-1]
-	}()
+	// Tomislav-RetCtx: a node requested while it is itself still being built closes a dependency cycle (A's build
+	// asked for B, B's build now asks for A). Building it again would recurse forever, so the namespace hands out a
+	// forward reference instead, which stands for the node and reaches it once it is built.
+	if def.Name == name && namespace.isBuilding(def) {
+		return namespace.forwardReference(name, def, dst)
+	}
+
+	// Track the defs being built. Tomislav-RetCtx: an alias pushes no frame of its own: the aliased name pushes its
+	// definition itself, and a second frame for the same definition would look like a cycle.
+	if def.Name == name {
+		namespace.stack = append(namespace.stack, def)
+		defer func() {
+			namespace.stack = namespace.stack[:len(namespace.stack)-1]
+		}()
+	}
 
 	// If it's an alias, get the aliased node
 	if def.Name != name {
@@ -228,6 +251,63 @@ func (namespace *namespaceimpl) get(name string, addEdge bool, dst any) error {
 	}
 	namespace.Info("Finished building %s of type %s", name, reflect.TypeOf(node).String())
 	namespace.Seen[name] = node
+	return copyResult(node, dst)
+}
+
+// Tomislav-RetCtx: isBuilding reports whether def is being built right now, i.e. is on the build stack.
+func (namespace *namespaceimpl) isBuilding(def *WiringDef) bool {
+	for _, building := range namespace.stack {
+		if building == def {
+			return true
+		}
+	}
+	return false
+}
+
+// Tomislav-RetCtx: forwardReference breaks the dependency cycle that closes at `name` (see [ForwardReferencer]). One
+// forward reference is made per name and passed to the handler like a built node, so it is generated with the rest
+// of the namespace; the node `name` itself is built and recorded as usual by the get call already in progress.
+func (namespace *namespaceimpl) forwardReference(name string, def *WiringDef, dst any) error {
+	cycle := []string{}
+	for i, building := range namespace.stack {
+		if building == def {
+			for _, d := range namespace.stack[i:] {
+				cycle = append(cycle, d.Name)
+			}
+			break
+		}
+	}
+	cycle = append(cycle, name)
+	path := fmt.Sprintf("%v", cycle)
+
+	if node, exists := namespace.Forwards[name]; exists {
+		return copyResult(node, dst)
+	}
+	referencer, canBreak := namespace.Handler.(ForwardReferencer)
+	if !canBreak {
+		return namespace.Error("dependency cycle %s: namespace %s (%s) cannot break it; deploy a service on the cycle behind an address (e.g. over RPC)", path, namespace.NamespaceName, namespace.NamespaceType)
+	}
+	resolve := func() (ir.IRNode, error) {
+		if node, built := namespace.Seen[name]; built && node != nil {
+			return node, nil
+		}
+		return nil, blueprint.Errorf("forward reference to %s in namespace %s: %s was never built", name, namespace.NamespaceName, name)
+	}
+	node, err := referencer.ForwardReference(name, resolve)
+	if err != nil {
+		return err
+	}
+	if namespace.Forwards == nil {
+		namespace.Forwards = make(map[string]ir.IRNode)
+	}
+	namespace.Forwards[name] = node
+	if _, added := namespace.Added[node.Name()]; !added {
+		if err := namespace.Handler.AddNode(node.Name(), node); err != nil {
+			return err
+		}
+		namespace.Added[node.Name()] = true
+	}
+	namespace.Info("Dependency cycle %s: the requester receives forward reference %s", path, node.Name())
 	return copyResult(node, dst)
 }
 

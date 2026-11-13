@@ -532,7 +532,12 @@ func structuralInputsFrom(parent context.Context) (in structuralInputs) {
 	if bag := backend.GetBaggageFromContext(parent); bag != nil {
 		in.br = bag[BaggageBRKey]
 	}
-	in.seqNum, _ = parent.Value("seqNum").(int)
+	if v := parent.Value("seqNum"); v != nil {
+		var isInt bool
+		if in.seqNum, isInt = v.(int); !isInt || in.seqNum < 1 { // Tomislav-RetCtx: invariants.go
+			brokenInt("a span's child ordinal (seqNum) is an int >= 1", "seqNum", in.seqNum, 1)
+		}
+	}
 	if in.seqNum == 2 {
 		in.parentID = trace.SpanFromContext(parent).SpanContext().SpanID()
 	}
@@ -574,7 +579,19 @@ func (p *StructuralBridgeProcessor) startStructural(s sdktrace.ReadWriteSpan, in
 		parentTTL, raw = p.checkpointRange.unwrap(raw)
 		var ok bool
 		parentDepth, anchor, distance, inherited, parentHA, tail, ok = scanStructuralBR(raw)
-		hasParent = ok && (!p.checkpointRange.enabled() || int(parentTTL) < distance)
+		// Tomislav-RetCtx: invariants (invariants.go): the parent's `_br` was written by this bridge
+		// (below), so it scans, and in range mode its TTL counts down below its distance.  It used to
+		// be dropped silently, starting a new window.
+		if !ok {
+			brokenRule("the parent's `_br` scans as an S-Bridge window")
+		}
+		if p.checkpointRange.enabled() && int(parentTTL) >= distance {
+			brokenInt("a window's TTL is below its distance", "ttl", int(parentTTL), distance)
+		}
+		hasParent = true
+		if in.seqNum < 1 { // a child of a bridge span took its ordinal from the parent's counter
+			brokenInt("an S-Bridge span with a parent window has a child ordinal >= 1", "seqNum", in.seqNum, 1)
+		}
 	}
 	cpd := int(p.checkpointDistance)
 	if cpd < 1 {
@@ -599,7 +616,13 @@ func (p *StructuralBridgeProcessor) startStructural(s sdktrace.ReadWriteSpan, in
 		}
 		inherited, parentHA, tail = nil, nil, rawStructuralTail{}
 	}
+	if distance < 1 || distance > len(checkpointBlooms) { // Tomislav-RetCtx: byte(distance-1) on the wire
+		brokenInt("a window's distance is 1..256", "distance", distance, len(checkpointBlooms))
+	}
 	geometry := checkpointBlooms[distance-1]
+	if inherited != nil && len(inherited) != geometry.bytes { // Tomislav-RetCtx: scanStructuralBR's width
+		brokenInt("an inherited Bloom has its distance's width", "bytes", len(inherited), geometry.bytes)
+	}
 	filter := bloom.NewFromBytes(inherited, geometry.m, geometry.k) // copies inherited
 
 	// CG core: fan-out witnesses follow the CGPB rule. The first-started child
@@ -689,6 +712,9 @@ func (p *StructuralBridgeProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	// conversion; the span's wire state is taken (and freed) here.
 	attrs := s.Attributes()
 	w := bridgeWires.take(s.SpanContext().SpanID())
+	if w == nil { // Tomislav-RetCtx: invariant (invariants.go): startStructural stores one for every span
+		brokenRule("an S-Bridge span ends with the wire entry its OnStart stored")
+	}
 	for _, attr := range attrs {
 		if attr.Key != "remEndEvents" {
 			continue
@@ -696,7 +722,10 @@ func (p *StructuralBridgeProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 		// Tomislav-RetCtx: raw bytes (the wrapper and the interceptor write them unencoded).
 		if summary := []byte(attr.Value.AsString()); len(summary) > 0 {
 			d, valid := structuralDelayedFromServer(s.SpanContext().TraceID(), s.SpanContext().SpanID(), summary)
-			if !valid || len(d.ends) == 0 {
+			if !valid { // Tomislav-RetCtx: written by this process's server instrumentation (setRemEndEvents)
+				brokenRule("a remEndEvents summary decodes")
+			}
+			if len(d.ends) == 0 {
 				continue
 			}
 			select {

@@ -110,7 +110,7 @@ def derive(source, root, kinds, repetitions, note, profile='passthrough', revers
            priority_queue=False, gateway_priority_queue=False, pprof=False, agent_compression=None, app_pprof=False,
            app_gc_memlimit=None, app_gctrace=False, discovery_override=None, plateau_stop=False, knee_windows=False,
            ramp_passes=None, pass_gap_seconds=60, first_pass=1, repeat_grid=False, seeds=None, trace_capture=True,
-           census=False, hotel_seed=None, workload=None):
+           census=False, hotel_seed=None, workload=None, lua_env=None, probe=None, redis_save=None, fresh_points=None):
     assert backend in BACKENDS, backend
     # Tomislav-RetCtx (user 2026-10-29): hotel_seed = dsb_hotel_seed spec text ('hotels=2000,users=5000,
     # reservations=20'): every hotel case gets a seeding Job and wait-seed init containers (real work only; the
@@ -336,10 +336,41 @@ def derive(source, root, kinds, repetitions, note, profile='passthrough', revers
     # Tomislav-RetCtx (user 2026-09-24): performance runs without trace sampling (loss evaluated separately)
     if not trace_capture:
         plan['trace_capture'] = False
+    # Tomislav-RetCtx (user 2026-11-05): fixed-rate probe points before and after every ramp (run_dsb_sn_nw.probe):
+    # CPU per request at one sub-knee rate, reported for every kind, and the drift between the two as the check
+    # that the ramp ran at a steady state.
+    if probe:
+        plan['probe'] = probe
+    # Tomislav-RetCtx (user 2026-11-06: "investigate if avoiding snapshots or altering snapshotting settings changes the
+    # intermittent bad points"): the Redis caches' RDB snapshot schedule (CONFIG SET save), applied right after the
+    # deploy (run_dsb_sn_nw.configure_redis); '' turns snapshots off. Omitted = the image default, as upstream
+    # DeathStarBench (docker-compose: plain redis; helm: a redis.conf without save lines), i.e.
+    # "3600 1 300 100 60 10000".
+    if redis_save is not None:
+        plan['redis_save'] = redis_save
+    # Tomislav-RetCtx (user 2026-11-11: "perhaps we need to reset every single time and then run a warmup and then just the
+    # main rate ... a fresher and better start every single time"): every ramp point gets its own fresh deployment
+    # (teardown, deploy, seeding, the usual settle and warm-up, the prefill), then warmup_seconds at the point's own
+    # rate, then the measured seconds_per_rate (run_dsb_sn_nw.fresh_point). The workload only adds data, so in one
+    # long-lived deployment every point starts from what all earlier points left; here every point starts from the
+    # same prefilled state. The opening / closing probes (a drift check across one deployment) do not apply.
+    if fresh_points:
+        assert not (probe or ramp_passes or knee_windows or repeat_grid), \
+            'fresh_points: one deployment per point; no probes, ramp passes, knee windows or repeat grid'
+        plan['fresh_points'] = dict(fresh_points, note='one fresh deployment per point: teardown, deploy, seeding, '
+                                    'settle + warm-up + prefill, then warmup_seconds at the point rate (wrk2, not '
+                                    'measured), then the measured point')
     # Tomislav-RetCtx (user 2026-10-29): the request mix and the seeded dataset are the campaign's, recorded in the plan
     if workload:
         plan['workload'] = dsb_hotel_seed.workload_for(app_name(cases[0]), workload, seed_spec)
         plan['request'] = plan['workload']['request']
+        # Tomislav-RetCtx (user 2026-10-30): workload knobs exported to the Lua script (search-hotels.lua
+        # STAY_MIN_NIGHTS / STAY_MAX_NIGHTS), recorded in the plan and in every point's command.json
+        if lua_env:
+            plan['workload']['lua_env'].update(lua_env)
+            plan['request'] += ' | lua env ' + ' '.join(f'{k}={v}' for k, v in sorted(lua_env.items()))
+    else:
+        assert not lua_env, '--lua-env needs --workload'
     if seed_spec:
         plan['hotel_seed'] = dict(seed_spec, spec=dsb_hotel_seed.spec_text(seed_spec))
         plan['seeding'] = ('seed_hotels.js Job seeds every database before its service starts (dsb_hotel_seed.install); '
@@ -431,6 +462,9 @@ if __name__ == '__main__':
                         help='N full ramps back to back in one deployment per kind (pass 1 fixes the grid via the plateau stop)')
     parser.add_argument('--no-trace-capture', action='store_true', help='no per-point trace sampling (performance runs)')
     parser.add_argument('--seeds', type=int, nargs='+', default=None, help='explicit wrk2 seed per repetition')
+    parser.add_argument('--fresh-points', type=int, default=None, metavar='WARMUP_SECONDS',
+                        help='one fresh deployment (seeding, warm-up, prefill) per ramp point, then WARMUP_SECONDS at '
+                             'the point rate before the measured seconds_per_rate (plan fresh_points)')
     parser.add_argument('--repeat-grid', action='store_true',
                         help='fresh deployment per repetition; repetition 1 stops at the plateau, later ones re-run its grid')
     parser.add_argument('--first-pass', type=int, default=1, help='number of the first pass run here (2 = top up an n=1 sweep)')
@@ -450,6 +484,17 @@ if __name__ == '__main__':
     parser.add_argument('--workload', choices=('search', 'mixed', 'compose'), default=None,
                         help="request mix: hotel 'search' (default, SearchHandler only) or 'mixed' (DSB 60/39/0.5/0.5); "
                              "SN 'compose' (default) or 'mixed' (DSB 60/30/10)")
+    parser.add_argument('--probe-rate', type=int, default=None,
+                        help='fixed-rate probe point before and after every ramp (req/s); off when omitted')
+    parser.add_argument('--probe-seconds', type=int, default=60, help='length of each probe point')
+    parser.add_argument('--probe-cooldown', type=int, default=60,
+                        help='idle seconds between the end of the ramp (overloaded) and the closing probe')
+    parser.add_argument('--redis-save', default=None, metavar='SCHEDULE',
+                        help="Redis caches' RDB snapshot schedule set after the deploy (CONFIG SET save), e.g. '' for "
+                             "no snapshots; the image default when omitted")
+    parser.add_argument('--lua-env', action='append', default=[], metavar='KEY=VALUE',
+                        help="environment for the workload's Lua script, repeatable (needs --workload), e.g. "
+                             "STAY_MAX_NIGHTS=3 for search-hotels.lua")
     parser.add_argument('--app-pprof', action='store_true', help='BRIDGES_PPROF=:6060 on every service (in-app CPU profiling)')
     parser.add_argument('--pprof', action='store_true', help='pprof extension (:1777) on agents and gateway (profiling)')
     parser.add_argument('--sdk-retry', choices=('priority',), default=None,
@@ -487,5 +532,10 @@ if __name__ == '__main__':
                        plateau_stop=args.plateau_stop, knee_windows=args.knee_windows,
                        ramp_passes=args.ramp_passes, pass_gap_seconds=args.pass_gap_seconds,
                        first_pass=args.first_pass, repeat_grid=args.repeat_grid, seeds=args.seeds, census=args.census,
-                       trace_capture=not args.no_trace_capture, hotel_seed=args.hotel_seed, workload=args.workload):
+                       trace_capture=not args.no_trace_capture, hotel_seed=args.hotel_seed, workload=args.workload,
+                       lua_env=dict(kv.split('=', 1) for kv in args.lua_env),
+                       probe={'rate': args.probe_rate, 'seconds': args.probe_seconds,
+                              'cooldown_seconds': args.probe_cooldown} if args.probe_rate else None,
+                       redis_save=args.redis_save,
+                       fresh_points={'warmup_seconds': args.fresh_points} if args.fresh_points else None):
         print(case['name'], case['case'])

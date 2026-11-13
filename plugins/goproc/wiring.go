@@ -58,6 +58,7 @@ import (
 	"github.com/blueprint-uservices/blueprint/blueprint/pkg/ir"
 	"github.com/blueprint-uservices/blueprint/blueprint/pkg/wiring"
 	"github.com/blueprint-uservices/blueprint/plugins/golang"
+	"github.com/blueprint-uservices/blueprint/plugins/golang/forward"
 )
 
 // AddToProcess can be used by wiring specs to add a golang instance to an existing golang process.
@@ -218,6 +219,13 @@ func (proc *golangProcessNamespace) Accepts(nodeType any) bool {
 func (proc *golangProcessNamespace) AddEdge(name string, edge ir.IRNode) error {
 	proc.Edges = append(proc.Edges, edge)
 	return nil
+}
+
+// Tomislav-RetCtx: implements [wiring.ForwardReferencer]. Services built in the same Golang namespace may depend on each
+// other in a cycle: the service that closes the cycle receives a forward reference (plugins/golang/forward) that
+// reaches its target at runtime, once the target is built.
+func (proc *golangProcessNamespace) ForwardReference(name string, resolve func() (ir.IRNode, error)) (ir.IRNode, error) {
+	return forward.New(name, resolve), nil
 }
 
 // Implements [wiring.NamespaceHandler]

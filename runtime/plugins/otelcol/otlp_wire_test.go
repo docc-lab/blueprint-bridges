@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -354,12 +355,15 @@ func randomWire(r *rand.Rand) *bridgeWire {
 		return nil
 	}
 	w := &bridgeWire{depth: r.IntN(300), priority: r.IntN(2) == 1, structural: r.IntN(2) == 1, ordinal: r.IntN(130)}
-	w.emit = make([]byte, r.IntN(60))
+	// Tomislav-RetCtx: only what OnStart and PrepareCheckpoint produce (the encoder checks it,
+	// invariants.go): a payload is never empty, and a reverse context is the packed envelope (its
+	// version byte, 0x01, first).
+	w.emit = make([]byte, 1+r.IntN(60))
 	for i := range w.emit {
 		w.emit[i] = byte(r.IntN(256))
 	}
 	if r.IntN(3) == 0 {
-		w.rev.rc = randomString(r, 30)
+		w.rev.rc = "\x01" + randomString(r, 29)
 	}
 	return w
 }
@@ -406,7 +410,17 @@ func TestEncodeSpanMatchesProtoMarshal(t *testing.T) {
 			w = randomWire(r)
 		}
 		hp := r.IntN(2) == 1
+		if w != nil && !hp {
+			w.rev.rc = "" // Tomislav-RetCtx: a span with a reverse context is always a checkpoint (pathCheckpoint)
+		}
 		attrs := s.Attributes()
+		if !hp && policy != policyVanilla {
+			// Tomislav-RetCtx: likewise an attribute-carried reverse context (`_rc`, legacy fixed mode)
+			// makes a bridge span a checkpoint, so an ordinary one never has it.
+			attrs = slices.DeleteFunc(slices.Clone(attrs), func(kv attribute.KeyValue) bool {
+				return kv.Key == backend.ReverseTrussCheckpointKey
+			})
+		}
 		want, err := proto.Marshal(refSpanProto(s, attrs, w, hp, policy))
 		if err != nil {
 			t.Fatal(err)
@@ -431,6 +445,10 @@ func TestBuildBatchMatchesProtoMarshal(t *testing.T) {
 	for _, res := range []*resource.Resource{nil, resource.Empty(), resource.NewSchemaless(attribute.String("service.name", "text"), attribute.Int("n", 3))} {
 		for _, scope := range []instrumentation.Scope{{Name: "TextService"}, {Name: "ComposePost", Version: "2"}, {}} {
 			for _, n := range []int{0, 1, 2, 17, 600} {
+				if n == 0 { // Tomislav-RetCtx: batches never builds an empty batch; buildBatch checks it
+					mustBreakInvariant(t, "empty batch", func() { buildBatch(resourceField(res), scopeField(scope), nil) })
+					continue
+				}
 				spans := make([]wireSpan, 0, n)
 				var ref []*tracepb.Span
 				for i := 0; i < n; i++ {
@@ -439,8 +457,17 @@ func TestBuildBatchMatchesProtoMarshal(t *testing.T) {
 					s := stub.Snapshot()
 					w := randomWire(r)
 					hp := r.IntN(2) == 1
-					spans = append(spans, encodeSpan(s, s.Attributes(), w, hp, policyStructural))
-					ref = append(ref, refSpanProto(s, s.Attributes(), w, hp, policyStructural))
+					attrs := s.Attributes()
+					if !hp { // Tomislav-RetCtx: as in TestEncodeSpanMatchesProtoMarshal: no reverse context on an ordinary span
+						if w != nil {
+							w.rev.rc = ""
+						}
+						attrs = slices.DeleteFunc(slices.Clone(attrs), func(kv attribute.KeyValue) bool {
+							return kv.Key == backend.ReverseTrussCheckpointKey
+						})
+					}
+					spans = append(spans, encodeSpan(s, attrs, w, hp, policyStructural))
+					ref = append(ref, refSpanProto(s, attrs, w, hp, policyStructural))
 				}
 				want, err := proto.Marshal(&coltracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{
 					Resource:   refResource(res),

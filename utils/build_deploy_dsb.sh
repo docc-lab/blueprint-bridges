@@ -31,7 +31,9 @@
 #   build_deploy_dsb.sh -s docker_v_es  -n v_esrev0  --build-collector --apply
 set -uo pipefail
 
-REPO=/users/tomislav/blueprint-docc-mod
+# Tomislav-RetCtx (2026-10-30): the repository this script lives in (the blueprint-perf worktree builds its own
+# examples; the hard-coded main checkout put generated code on a different branch than the images under test)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DSB=$REPO/examples/dsb_sn
 UTILS=$REPO/utils
 REGISTRY=10.10.1.1:30000

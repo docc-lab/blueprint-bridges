@@ -38,5 +38,10 @@ func main() {
 		specs.DockerSBNW,
 		specs.DockerNTES,
 		specs.DockerNTESNW,
+		specs.DockerVESBD,
+		specs.DockerPBESBD,
+		specs.DockerCGPBESBD,
+		specs.DockerSBESBD,
+		specs.DockerNTESBD,
 	)
 }

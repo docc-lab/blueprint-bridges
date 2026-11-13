@@ -188,6 +188,9 @@ func (p *reverseCheckpointProcessor) PrepareServerCheckpoint(span trace.Span, re
 // prepare is PrepareCheckpoint; children is the span's child count, or -1 if the caller does not
 // know it (then a server span's children attributes are read).
 func (p *reverseCheckpointProcessor) prepare(span trace.Span, returned string, children int) string {
+	if children < -1 { // Tomislav-RetCtx: invariant (invariants.go): a count, or -1 for "unknown"
+		brokenInt("a server span's child count is >= 0 (or -1: unknown)", "children", children, -1)
+	}
 	s, ok := span.(sdktrace.ReadWriteSpan)
 	if !ok || !s.IsRecording() {
 		return ""

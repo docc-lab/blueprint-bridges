@@ -79,7 +79,19 @@ func onStartCheckpointWindow(parent context.Context, s sdktrace.ReadWriteSpan, r
 			parentTTL, raw = r.unwrap(raw)
 			var ok bool
 			parentDepth, anchor, distance, inherited, parentHA, ok = unpackCheckpointWindowBR(raw)
-			hasParent = ok && int(parentTTL) < distance && (callGraph || len(parentHA) == 0)
+			// Tomislav-RetCtx: invariants (invariants.go): a parent's `_br` was written by this same
+			// bridge (encodeWindowPayloads), so it unpacks, its TTL counts down below its distance, and
+			// a PB window has no HA.  It used to be dropped silently, starting a new window.
+			if !ok {
+				brokenRule("the parent's `_br` unpacks as a window")
+			}
+			if int(parentTTL) >= distance {
+				brokenInt("a window's TTL is below its distance", "ttl", int(parentTTL), distance)
+			}
+			if !callGraph && len(parentHA) != 0 {
+				brokenInt("a PB window carries no HA", "ha bytes", len(parentHA), 0)
+			}
+			hasParent = true
 		}
 	}
 
@@ -94,7 +106,10 @@ func onStartCheckpointWindow(parent context.Context, s sdktrace.ReadWriteSpan, r
 	}
 	var ha []byte
 	if callGraph && hasParent {
-		seq, _ := parent.Value("seqNum").(int)
+		seq, isInt := parent.Value("seqNum").(int)
+		if !isInt || seq < 1 { // Tomislav-RetCtx: a span inside a bridge window has its child ordinal
+			brokenInt("a CGPB span with a parent window has a child ordinal >= 1", "seqNum", seq, 1)
+		}
 		if seq == 1 {
 			ha = append([]byte(nil), parentHA...)
 		} else if seq == 2 {
@@ -120,8 +135,16 @@ func onStartCheckpointWindow(parent context.Context, s sdktrace.ReadWriteSpan, r
 // checkpoint_window_encode_test.go checks against that path.
 func encodeWindowPayloads(r checkpointRange, depth int, anchor [8]byte, distance int, inherited, ha []byte,
 	isCheckpoint bool, outgoingTTL byte, sid trace.SpanID) (emit, wrapped []byte) {
+	if distance < 1 || distance > len(checkpointBlooms) { // Tomislav-RetCtx: byte(distance-1) on the wire
+		brokenInt("a window's distance is 1..256", "distance", distance, len(checkpointBlooms))
+	}
 	geometry := checkpointBlooms[distance-1]
 	if len(inherited) != geometry.bytes { // NewFromBytes: anything but an exact-size window starts empty
+		// Tomislav-RetCtx: only a root (no parent window) starts empty; a parent's Bloom is exactly the
+		// width of its distance (unpackCheckpointWindowBR).
+		if inherited != nil {
+			brokenInt("an inherited Bloom has its distance's width", "bytes", len(inherited), geometry.bytes)
+		}
 		inherited = nil
 	}
 	propAnchor, propDistance, propGeometry, propInherited, propHA := anchor, distance, geometry, inherited, ha

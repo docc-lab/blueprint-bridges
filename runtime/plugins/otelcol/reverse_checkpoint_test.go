@@ -70,7 +70,10 @@ func checkpointParentContext(kind string, depth int) context.Context {
 	if kind == "sb" {
 		bagBR = propBR(br) // SB keeps its state beside the span: raw bytes (pack.go)
 	}
-	return backend.SetBaggageInContext(context.Background(), map[string]string{
+	// Tomislav-RetCtx: a span under a bridge window always has its child ordinal on the context (the
+	// instrumentation puts it there; the processors check it): a first child.
+	ctx := context.WithValue(context.Background(), "seqNum", 1)
+	return backend.SetBaggageInContext(ctx, map[string]string{
 		reverseDepthBaggageKey: strconv.Itoa(depth), BaggageBRKey: bagBR,
 	})
 }

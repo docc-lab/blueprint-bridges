@@ -92,6 +92,16 @@ APPS['hotelnw'] = dict(APPS['hotel'], seed={})
 # (DeathStarBench init_social_graph.py, as run_dsb_sn_e2e.deploy_seed does).
 APPS['snrw'] = dict(APPS['sn'], seed={}, social_graph=True)
 
+# Tomislav-RetCtx (user 2026-11-05): BOUNDED real-work Social Network (examples/dsb_sn/workflow/snbounded, specs
+# docker_<kind>_es_bd, prepare_dsb_sn_nw.py --bounded): same deployment, workload, seeding and checkpoint policy as
+# 'snrw', but every timeline is capped at TimelineCap = 128 posts. The runner pre-fills after the warm-up until every
+# posting user (compose-post.lua draws users 1..961) has at least that many posts, so the ramp starts at the steady
+# state and a request's cost no longer depends on how many posts came before it (run_dsb_sn_nw.prefill).
+# Tomislav-RetCtx (user 2026-11-06, match upstream): no userid service (the user and social-graph services call each other
+# as upstream's), so 12 application services and 24 deployments (5 mongo, 3 redis, 2 memcached, jaeger, ES).
+APPS['snbd'] = dict(APPS['snrw'], app_services=12, deployments=24, prefill={'posts_per_user': 128, 'users': 961, 'rate': 800, 'margin': 1.5,
+                                           'max_top_ups': 3, 'top_up_seconds': 60})
+
 
 def app_name(record):
     """The app of a plan.json / case.json dict (older SN roots carry no field)."""

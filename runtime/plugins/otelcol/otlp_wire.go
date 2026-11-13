@@ -196,6 +196,9 @@ func putBatchBuf(b *[]byte) {
 // release returns the batch's buffer to the free list (its grown size with it).  Called exactly
 // once per batch; the request bytes must not be used afterwards.
 func (b *wireBatch) release() {
+	if b.buf == nil { // Tomislav-RetCtx: invariant (invariants.go): released exactly once
+		brokenRule("a batch is released once")
+	}
 	*b.buf = b.req[:0]
 	b.req = nil
 	putBatchBuf(b.buf)
@@ -346,6 +349,9 @@ func anyValueProto(v attribute.Value) *commonpb.AnyValue {
 //	resourceSpans := resourceField || 0x12 len( scopeSpans )
 //	scopeSpans    := scopeField || ( 0x12 len( span ) )*
 func buildBatch(resource, scope []byte, spans []wireSpan) *wireBatch {
+	if len(spans) == 0 { // Tomislav-RetCtx: invariant (invariants.go): batches emits non-empty runs only
+		brokenInt("a batch has spans", "spans", len(spans), 1)
+	}
 	ss := len(scope)
 	for i := range spans {
 		ss += 1 + uvarintLen(uint64(len(spans[i].body))) + len(spans[i].body)
@@ -365,6 +371,9 @@ func buildBatch(resource, scope []byte, spans []wireSpan) *wireBatch {
 	req = append(req, scope...)
 	for i := range spans {
 		req = appendBytesField(req, 2, spans[i].body)
+	}
+	if len(req) != total { // Tomislav-RetCtx: invariant: the lengths written up front are the bytes that follow
+		brokenInt("an export request matches its computed size", "bytes", len(req), total)
 	}
 	return &wireBatch{req: req, n: int64(len(spans)), spans: spans, buf: buf}
 }
@@ -389,6 +398,9 @@ func sortByScope(snap []wireSpan) {
 // ScopeSpans wrapping the run.  The batches keep sub-slices of the snapshot, which the caller must
 // not reuse.  Used by the flush of every processor.
 func batches(resource []byte, snap []wireSpan, max int, emit func(*wireBatch)) {
+	if max < 1 { // Tomislav-RetCtx: invariant (invariants.go)
+		brokenInt("a batch holds at least one span", "max", max, 1)
+	}
 	sortByScope(snap)
 	for start := 0; start < len(snap); {
 		end := start + 1
@@ -422,6 +434,20 @@ const (
 func encodeSpan(s sdktrace.ReadOnlySpan, attrs []attribute.KeyValue, w *bridgeWire, highPriority bool, policy attrPolicy) wireSpan {
 	sc := s.SpanContext()
 	tid, sid := sc.TraceID(), sc.SpanID()
+	// Tomislav-RetCtx: invariants (invariants.go): an ended span has valid IDs; a checkpoint with wire
+	// state has a payload (OnStart wrote one for every span), and the reverse context it took over is
+	// the packed envelope (reverse_checkpoint.go keeps it raw beside the span).
+	if !sc.IsValid() {
+		brokenRule("an exported span has a valid span context")
+	}
+	if w != nil {
+		if highPriority && len(w.emit) == 0 {
+			brokenRule("a checkpoint with wire state has a `_br` payload")
+		}
+		if w.rev.rc != "" && !backend.IsPackedRetCtx(w.rev.rc) {
+			brokenInt("a span's reverse context is a packed envelope", "first byte", int(w.rev.rc[0]), 1)
+		}
+	}
 	size := 64 + len(s.Name()) + 32*len(attrs) + 48*len(s.Events()) + 48*len(s.Links())
 	if w != nil {
 		size += len(w.emit) + len(w.rev.rc) + 16
@@ -607,6 +633,10 @@ func legacyBytes(b64 string) []byte {
 // is utils/retctx_wire.py.  A reverse context never occurs on an ordinary span (pathCheckpoint makes
 // such a span a checkpoint); should one, it is dropped here rather than exported on its own.
 func appendBridgeWireBytes(buf []byte, b bridgeBytes, highPriority bool) []byte {
+	if !highPriority && b.rc != "" { // Tomislav-RetCtx: invariant: pathCheckpoint / structuralCheckpoint
+		// make every span with a reverse context a checkpoint (it used to be dropped here silently)
+		brokenRule("only a checkpoint carries a reverse context")
+	}
 	if highPriority {
 		return appendKeyBR(buf, 9, b.rc, b.emit)
 	}
@@ -629,10 +659,15 @@ func appendKeyBR(buf []byte, field int, rc string, emit []byte) []byte {
 	buf = appendStringField(buf, 1, AttrBREmit)
 	inner := len(buf)
 	buf = append(buf, byte(7<<3|2))
-	buf = binary.AppendUvarint(buf, uint64(uvarintLen(uint64(len(rc)))+len(rc)+len(emit)))
+	want := uvarintLen(uint64(len(rc))) + len(rc) + len(emit)
+	buf = binary.AppendUvarint(buf, uint64(want))
+	value := len(buf)
 	buf = binary.AppendUvarint(buf, uint64(len(rc)))
 	buf = append(buf, rc...)
 	buf = append(buf, emit...)
+	if len(buf)-value != want { // Tomislav-RetCtx: invariant: the length prefix is the value written
+		brokenInt("the `_br` bytes value matches its length prefix", "written", len(buf)-value, want)
+	}
 	buf = closeMessage(buf, 2, inner)
 	return closeMessage(buf, field, mark)
 }
@@ -759,6 +794,9 @@ func uvarintLen(v uint64) int {
 // and the length are inserted in front of the body by moving the body right (one copy of a small
 // body, instead of encoding into a scratch buffer and copying it over).
 func closeMessage(buf []byte, field int, mark int) []byte {
+	if field < 1 || field > 15 { // Tomislav-RetCtx: invariant: the tag below is one byte (field<<3 | 2)
+		brokenInt("a closed message's field number is 1..15", "field", field, 15)
+	}
 	n := len(buf) - mark
 	hdr := 1 + uvarintLen(uint64(n))
 	buf = append(buf, make([]byte, hdr)...)

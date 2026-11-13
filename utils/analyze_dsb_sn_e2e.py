@@ -180,9 +180,16 @@ def verify_raw(point, result):
     assert result['p99_ms'] <= result['max_ms'] + tolerance
     stderr = (point / 'wrk.stderr').read_text()
     seeds = re.findall(r'init: final thread_id=(\d+), base_seed=(\d+)', stderr)
-    assert len(seeds) == result['threads'], 'missing generator thread initialization'
-    assert {int(s) for _, s in seeds} == {result['seed']}, seeds
-    assert {int(t) for t, _ in seeds} == set(range(1, result['threads'] + 1))
+    # Tomislav-RetCtx (2026-10-29): only compose-post.lua (social network) reports its per-thread
+    # seeding on stderr; search-hotels.lua seeds the same way but prints nothing, so the check
+    # applies to points whose wrk command ran compose-post.lua (command.json records the argv).
+    script = next((a for a in json.loads((point / 'command.json').read_text())['argv'] if a.endswith('.lua')), '')
+    if script.endswith('compose-post.lua'):
+        assert len(seeds) == result['threads'], 'missing generator thread initialization'
+        assert {int(s) for _, s in seeds} == {result['seed']}, seeds
+        assert {int(t) for t, _ in seeds} == set(range(1, result['threads'] + 1))
+    else:
+        assert not seeds, 'unexpected generator seed output'  # search-hotels.lua writes only request errors
 
 
 def resource_deltas(before, after):

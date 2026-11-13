@@ -133,3 +133,47 @@ func (l *TestLeafServiceImpl) NonServiceFunction() int64 {
 func (l *TestLeafServiceImpl) privateNonServiceFunction() int64 {
 	return 7
 }
+
+// Tomislav-RetCtx: TestPingService and TestPongService depend on each other (a dependency cycle), for the cycle tests in
+// test/wiring/cycle_test.go.
+type (
+	TestPingService interface {
+		Ping(ctx context.Context, n int64) (int64, error)
+	}
+
+	TestPongService interface {
+		Pong(ctx context.Context, n int64) (int64, error)
+	}
+
+	TestPingServiceImpl struct {
+		pong TestPongService
+	}
+
+	TestPongServiceImpl struct {
+		ping TestPingService
+	}
+)
+
+func NewTestPingServiceImpl(ctx context.Context, pong TestPongService) (TestPingService, error) {
+	return &TestPingServiceImpl{pong: pong}, nil
+}
+
+func NewTestPongServiceImpl(ctx context.Context, ping TestPingService) (TestPongService, error) {
+	return &TestPongServiceImpl{ping: ping}, nil
+}
+
+func (s *TestPingServiceImpl) Ping(ctx context.Context, n int64) (int64, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+	r, err := s.pong.Pong(ctx, n-1)
+	return r + 1, err
+}
+
+func (s *TestPongServiceImpl) Pong(ctx context.Context, n int64) (int64, error) {
+	if n <= 0 {
+		return 0, nil
+	}
+	r, err := s.ping.Ping(ctx, n-1)
+	return r + 1, err
+}

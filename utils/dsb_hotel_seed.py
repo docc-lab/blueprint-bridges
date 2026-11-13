@@ -171,6 +171,7 @@ WORKLOADS = {
 }
 WORKLOADS['hotelnw'] = WORKLOADS['hotel']
 WORKLOADS['snrw'] = WORKLOADS['sn']
+WORKLOADS['snbd'] = WORKLOADS['sn']
 
 
 def workload_for(app, name, spec=None):

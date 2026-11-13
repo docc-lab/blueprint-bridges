@@ -32,7 +32,10 @@ def backend_digests(pinned_manifest):
         image = doc['spec']['template']['spec']['containers'][0]['image']
         assert '@sha256:' in image, image
         backends[re.sub(r'-(?:cgpb|pb|sb|v)-es.*-ctr$', '', name)] = image
-    assert len(backends) == 12, sorted(backends)  # 5 mongo, 5 redis, jaeger, elasticsearch
+    # Tomislav-RetCtx (2026-10-29): a hotel build only takes jaeger and elasticsearch from here, so a
+    # manifest holding just those two (utils/backend-manifest-*.yaml, written when the registry was
+    # rebuilt) is enough; a Social Network build still needs all 12 backends.
+    assert len(backends) == 12 or {'jaeger', 'elasticsearch'} <= set(backends), sorted(backends)
     return backends
 
 
@@ -59,6 +62,8 @@ def build(root, pinned_manifest):
     cases = json.loads((root / 'cases.json').read_text())
     app = app_of(cases[0])
     backends = backend_digests(pinned_manifest) if app['backends'] == 12 else None
+    if backends is not None:
+        assert len(backends) == 12, sorted(backends)
     bases_path = root / 'base-image-digests.json'
     bases = json.loads(bases_path.read_text()) if bases_path.exists() else {}
     total = app['app_services'] * len({c['kind'] for c in cases})
