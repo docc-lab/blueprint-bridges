@@ -9,7 +9,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Tomislav-RetCtx: the tracing middleware for services deployed with the HTTP plugin
+// The tracing middleware for services deployed with the HTTP plugin
 // (runtime/plugins/httpmiddleware), the HTTP counterpart of the gRPC interceptors.  The steps are the
 // gRPC ones (server.go, client.go); only where the two values travel differs:
 //
@@ -53,7 +53,7 @@ type httpServerHandler struct {
 }
 
 func (h *httpServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctx, state, sampled := h.s.prepare(r.Context(), headerValue(r.Header, traceCtxHeader)) // server.go: steps 1-3; below
+	ctx, state, sampled := h.s.prepare(r.Context(), headerValue(r.Header, traceCtxHeader)) // steps 1-3; below
 	if !sampled {
 		// Unsampled upstream: ctx only carries the remote IDs; no span, no tracing work.
 		h.next.ServeHTTP(w, r.WithContext(ctx))
@@ -65,7 +65,7 @@ func (h *httpServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, call.span = h.m.tracer.Start(ctx, h.m.spanName, trace.WithSpanKind(trace.SpanKindServer))
 	defer call.span.End()
 
-	h.s.setup(&call, ctx) // server.go: steps 5-6
+	h.s.setup(&call, ctx) // steps 5-6
 
 	// 7. The service, through the generated handler.  Steps 8-9 run when it starts the response.
 	resp := &tracedResponse{ResponseWriter: w, s: h.s, call: &call}
@@ -109,9 +109,9 @@ func (r *tracedResponse) finish(status int) {
 		return
 	}
 	r.finished = true
-	retCtx := r.s.finish(r.call, r.err) // server.go
+	retCtx := r.s.finish(r.call, r.err)
 	if retCtx != "" && status < 300 {
-		r.ResponseWriter.Header()[retCtxHTTPKey] = []string{retCtxHeader(retCtx)} // header.go
+		r.ResponseWriter.Header()[retCtxHTTPKey] = []string{retCtxHeader(retCtx)}
 	}
 }
 
@@ -119,8 +119,8 @@ func (r *tracedResponse) finish(status int) {
 // without Header.Get's canonicalisation on every call.
 func headerValue(h http.Header, canonicalKey string) string {
 	if v := h[canonicalKey]; len(v) > 0 {
-		if len(v) > 1 { // Tomislav-RetCtx: the other side sets exactly one (withHeader, tracedResponse.finish)
-			brokenCount("one value per tracing header", canonicalKey, len(v), 1) // invariants.go
+		if len(v) > 1 { // the other side sets exactly one
+			brokenCount("one value per tracing header", canonicalKey, len(v), 1)
 		}
 		return v[0]
 	}

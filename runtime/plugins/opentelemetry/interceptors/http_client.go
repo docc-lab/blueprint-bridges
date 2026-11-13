@@ -13,7 +13,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Tomislav-RetCtx: the client side of the HTTP tracing middleware (see http_server.go).
+// The client side of the HTTP tracing middleware (see http_server.go).
 
 // NewHTTPClientMiddleware returns the tracing client middleware for the given bridge kind.  See
 // [NewServerInterceptor] for the arguments.
@@ -45,25 +45,25 @@ type tracedTransport struct {
 func (t *tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	ctx := req.Context()
 	// 1. Unsampled parent: forward only the compact carrier so downstream stays unsampled.
-	if unsampledParent(ctx) { // client.go
+	if unsampledParent(ctx) {
 		return t.next.RoundTrip(withHeader(req, traceCtxHeader, encodeUnsampledCarrier(trace.SpanContextFromContext(ctx)))) // carrier.go; below
 	}
 
 	call := &clientCall{}
-	ctx, baggage := t.c.prepare(call, ctx) // client.go: steps 2-3
+	ctx, baggage := t.c.prepare(call, ctx) // steps 2-3
 
 	// 4. The client span.  It ends when the caller closes the response body (spanBody below), i.e.
 	//    once the generated client has read and decoded the response, as the wrapper's span did.
 	m := t.method(req.URL.Path)
 	ctx, call.span = m.tracer.Start(ctx, m.spanName, trace.WithSpanKind(trace.SpanKindClient))
 	call.ctx = ctx
-	carrier := carrierFor(call.span, baggage, t.c.attrBaggage) // client.go: step 5
+	carrier := carrierFor(call.span, baggage, t.c.attrBaggage) // step 5
 	putBaggage(baggage)
 
 	// 6. The call.
 	resp, err := t.next.RoundTrip(withHeader(req, traceCtxHeader, carrier))
 	if err != nil {
-		t.c.finish(call, err) // client.go: step 8
+		t.c.finish(call, err) // step 8
 		call.span.End()
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func (t *tracedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	// 7. The reverse context, from the response header (bridges with REVERSE_TRUSS=on).
 	if t.c.reverse {
-		finishClientRetCtx(call.ctx, t.c.tp, call.span, retCtxFromHeader(headerValue(resp.Header, retCtxHTTPKey))) // client.go; header.go; http_server.go
+		finishClientRetCtx(call.ctx, t.c.tp, call.span, retCtxFromHeader(headerValue(resp.Header, retCtxHTTPKey)))
 	}
 	resp.Body = &spanBody{ReadCloser: resp.Body, c: t.c, call: call}
 	return resp, nil
@@ -86,7 +86,7 @@ func (t *tracedTransport) method(path string) *methodInfo {
 	if m, ok := t.methods.Load(path); ok {
 		return m.(*methodInfo)
 	}
-	actual, _ := t.methods.LoadOrStore(path, newMethodInfo(t.c.tp, clientSpanNames, t.service, strings.TrimPrefix(path, "/"))) // interceptors.go
+	actual, _ := t.methods.LoadOrStore(path, newMethodInfo(t.c.tp, clientSpanNames, t.service, strings.TrimPrefix(path, "/")))
 	return actual.(*methodInfo)
 }
 
@@ -101,7 +101,7 @@ type spanBody struct {
 func (b *spanBody) Close() error {
 	err := b.ReadCloser.Close()
 	b.once.Do(func() {
-		b.c.finish(b.call, nil) // client.go: step 8
+		b.c.finish(b.call, nil) // step 8
 		b.call.span.End()
 	})
 	return err

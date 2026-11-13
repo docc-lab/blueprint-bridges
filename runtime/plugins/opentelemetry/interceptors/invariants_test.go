@@ -1,8 +1,7 @@
 package interceptors
 
-// Tomislav-RetCtx (user 2026-11-06): each tracing invariant the interceptors and the HTTP middleware
-// check panics with a *backend.InvariantError when it is broken (mustBreakInvariant: header_test.go),
-// and the input a traced caller really sends passes.
+// Each invariant the interceptors and the HTTP middleware check panics with a *backend.InvariantError
+// when broken, and what a traced caller really sends passes.
 
 import (
 	"context"

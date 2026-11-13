@@ -1,9 +1,8 @@
 package interceptors
 
 // Tests for the tracing interceptors over real gRPC (an in-memory connection), with an in-memory span
-// recorder instead of a collector.  Tomislav-RetCtx: every test that makes calls runs twice, once
-// over gRPC with the interceptors and once over HTTP with the HTTP middleware (http_server.go,
-// http_client.go), so the two are held to the same assertions.
+// recorder instead of a collector. Every test that makes calls runs twice, once over gRPC with the
+// interceptors and once over HTTP with the HTTP middleware, so both are held to the same assertions.
 //
 // The test service is gRPC's standard health service (it ships with grpc-go, so no protoc step is
 // needed).  Its one method is /grpc.health.v1.Health/Check, so the interceptors name the spans
@@ -328,7 +327,7 @@ func TestVanillaRetCtx(t *testing.T) {
 	forTransports(t, func(t *testing.T, tr transport) {
 		t.Setenv("REVERSE_TRUSS", "on")
 		_, tracer := newRecorder(sdktrace.AlwaysSample())
-		ret := backend.EncodeCheckpointRetCtx(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 1, backend.SegPathCheckpoint, nil) // Tomislav-RetCtx: the kind live code passes, so the envelope is packed
+		ret := backend.EncodeCheckpointRetCtx(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 1, backend.SegPathCheckpoint, nil) // the kind live code passes, so the envelope is packed
 
 		for _, tc := range []struct {
 			name    string
@@ -525,7 +524,7 @@ func TestVanillaNoBridgeState(t *testing.T) {
 func TestRequestStateKeys(t *testing.T) {
 	type otherKey struct{}
 	parent := context.WithValue(context.Background(), otherKey{}, "parent value")
-	ret := backend.EncodeCheckpointRetCtx(trace.SpanID{9}, 1, backend.SegPathCheckpoint, nil) // Tomislav-RetCtx: the kind live code passes, so the envelope is packed
+	ret := backend.EncodeCheckpointRetCtx(trace.SpanID{9}, 1, backend.SegPathCheckpoint, nil) // the kind live code passes, so the envelope is packed
 	for _, v := range []variant{variantFor("v"), variantFor("pb"), variantFor("sb")} {
 		bag := map[string]string{"__seq": "4"}
 		s := &requestState{Context: parent, children: v.countChildren, hasEndEvents: v.endEvents,

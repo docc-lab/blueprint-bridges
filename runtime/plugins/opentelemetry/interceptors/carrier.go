@@ -10,13 +10,10 @@ import (
 
 // Compact trace carrier, sent from the client interceptor to the server interceptor.
 //
-// The wrappers send the forward context as JSON (backend.EncodeTraceCarrier in
-// runtime/core/backend/carrier_json.go: about 150 bytes plus baggage) inside the request message,
-// where it costs little more than a copy.  As a gRPC header the same JSON is expensive: HTTP/2
-// compresses every header on the way out and decompresses it on the way in (HPACK), and because the
-// value differs on every call it also keeps replacing entries in the connection's header table.
-// Profiling showed that as the largest part of the interceptors' extra CPU
-// (utils/grpc_interceptors/README.md, "Profiling").
+// The wrappers send the forward context as JSON (backend.EncodeTraceCarrier: about 150 bytes plus
+// baggage) inside the request message. As a gRPC header the same JSON is expensive: HTTP/2
+// compresses and decompresses every header (HPACK), and a value that changes on every call keeps
+// replacing entries in the connection's header table.
 //
 // So between interceptors the context travels in this compact form instead: a small binary record,
 // sent as text in the header TraceCtxKey, written with headerEncoding (header.go: base64 with an
@@ -43,7 +40,7 @@ const (
 )
 
 var (
-	carrierEncoding = headerEncoding // header.go
+	carrierEncoding = headerEncoding
 	errBadCarrier   = errors.New("malformed trace carrier")
 )
 
@@ -66,7 +63,7 @@ func encodeCarrier(sc trace.SpanContext, baggage map[string]string) string {
 		buf = binary.AppendUvarint(buf, uint64(len(v)))
 		buf = append(buf, v...)
 	}
-	return toBase64(buf) // below
+	return toBase64(buf)
 }
 
 // encodeUnsampledCarrier builds the carrier for a span that head sampling dropped: only the IDs, so
@@ -77,7 +74,7 @@ func encodeUnsampledCarrier(sc trace.SpanContext) string {
 	buf[0] = carrierUnsampled
 	copy(buf[1:17], tid[:])
 	copy(buf[17:25], sid[:])
-	return toBase64(buf[:]) // below
+	return toBase64(buf[:])
 }
 
 // toBase64 encodes raw into a new string with a single allocation: the encoded bytes become the

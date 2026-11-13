@@ -77,7 +77,7 @@ func benchCalls(b *testing.B, client healthpb.HealthClient, kind string, goPerCa
 	ctx, root := tp.Tracer("bench").Start(context.Background(), "root")
 	defer root.End()
 	if kind != "" {
-		ctx, _ = rootCtx(staticTracer{tp}, kind) // interceptors_test.go: per-request state like a traced server
+		ctx, _ = rootCtx(staticTracer{tp}, kind) // per-request state like a traced server
 	}
 	req := &healthpb.HealthCheckRequest{}
 	b.ReportAllocs()

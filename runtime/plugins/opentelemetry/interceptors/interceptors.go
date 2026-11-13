@@ -108,9 +108,8 @@ const (
 
 // variantFor maps OT_BRIDGE values to variants, exactly as the wrapper templates are chosen in
 // plugins/opentelemetry (ir_ot_server.go / ir_ot_client.go): "v"/"vanilla", "cgpb", "sb", and
-// "pb"/"path"/"rc"/"" for the path bridge.  Tomislav-RetCtx: any other value is a broken invariant
-// (it used to mean the path bridge silently); the template generator refuses it the same way at build
-// time.  Called by the constructors, so a bad kind stops the process at startup.
+// "pb"/"path"/"rc"/"" for the path bridge. Any other value is a broken invariant, so a bad kind stops
+// the process at startup; the template generator refuses it the same way at build time.
 func variantFor(kind string) variant {
 	switch kind {
 	case "v", "vanilla":
@@ -122,17 +121,16 @@ func variantFor(kind string) variant {
 	case "pb", "path", "rc", "":
 		return variant{name: "pb", countChildren: true, childAttr: hasChildrenAttr}
 	}
-	backend.InvariantBroken("OT_BRIDGE is one of v, vanilla, pb, path, rc, cgpb, sb or empty", "kind=", kind) // runtime/core/backend/invariant.go
+	backend.InvariantBroken("OT_BRIDGE is one of v, vanilla, pb, path, rc, cgpb, sb or empty", "kind=", kind)
 	return variant{}
 }
 
 // What an interceptor needs for one gRPC method: the span name and the tracer to start the span
 // with.  Both are worked out on the first call of the method and then reused (see methodCache).
 //
-// The wrappers do this work on every call: their span names are constants, but they ask the tracer
-// provider for the tracer every time (tp.Tracer(name): in the OTel SDK a lock plus a map lookup;
-// about 0.25 s of ComposePost's CPU in a 30 s profile at 800 req/s).  The SDK returns the same
-// tracer for the same name every time, so caching it changes nothing but the cost.
+// The wrappers ask the tracer provider for the tracer on every call, which in the OTel SDK is a lock
+// and a map lookup. The SDK returns the same tracer for a name every time, so caching it changes
+// nothing but the cost.
 type methodInfo struct {
 	spanName string
 	tracer   trace.Tracer
@@ -160,7 +158,7 @@ func (c *methodCache) get(fullMethod string) *methodInfo {
 	if m, ok := c.methods.Load(fullMethod); ok {
 		return m.(*methodInfo)
 	}
-	service, method := splitMethod(fullMethod) // below
+	service, method := splitMethod(fullMethod)
 	actual, _ := c.methods.LoadOrStore(fullMethod, newMethodInfo(c.tp, c.side, service, method))
 	return actual.(*methodInfo)
 }
@@ -168,10 +166,10 @@ func (c *methodCache) get(fullMethod string) *methodInfo {
 // newMethodInfo names the span and fetches the tracer for one method of a service, on one side.
 // Used by methodCache.get and by the HTTP middleware (http_server.go, http_client.go).
 func newMethodInfo(tp trace.TracerProvider, side side, service, method string) *methodInfo {
-	// Tomislav-RetCtx: span and tracer names are built from both parts ("/pkg.Service/Method" for
-	// gRPC, the service name and "/Method" for HTTP); once per method, the result is cached.
+	// Span and tracer names are built from both parts ("/pkg.Service/Method" for gRPC, the service
+	// name and "/Method" for HTTP), once per method.
 	if service == "" || method == "" {
-		brokenValue("a traced method has a service name and a method name", "service/method", service+"/"+method) // invariants.go
+		brokenValue("a traced method has a service name and a method name", "service/method", service+"/"+method)
 	}
 	var tracerName, spanName string
 	if side == serverSpanNames {
@@ -221,7 +219,7 @@ func startAttributeBaggage(tracer backend.Tracer) bool {
 // can only come from the SDK, and the tracer said its SDK adds no "__bag." ones (see
 // startAttributeBaggage above).  Reading them costs a lock and a copy of the attribute list.
 func mergeSpanBaggage(span trace.Span, baggage map[string]string, attrBaggage bool) {
-	backend.AppendSpanBaggage(span, baggage) // runtime/core/backend/span_baggage.go
+	backend.AppendSpanBaggage(span, baggage)
 	if !attrBaggage {
 		return
 	}
@@ -230,7 +228,7 @@ func mergeSpanBaggage(span trace.Span, baggage map[string]string, attrBaggage bo
 		return
 	}
 	for _, attr := range rwSpan.Attributes() {
-		if backend.IsReverseBaggageKey(attr.Key) { // runtime/core/backend/checkpoint.go
+		if backend.IsReverseBaggageKey(attr.Key) {
 			continue
 		}
 		if key, found := strings.CutPrefix(string(attr.Key), "__bag."); found {

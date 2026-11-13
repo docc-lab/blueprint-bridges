@@ -7,11 +7,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Tomislav-RetCtx (user 2026-11-06): the failure paths of the interceptors' invariant checks.  They
-// format their typed arguments and call backend.InvariantBroken (runtime/core/backend/invariant.go),
-// which panics.  Calling backend.InvariantBroken directly with boxed values would make every checking
-// function reserve stack space for that boxing on every call (setup's frame grew from 48 to 536
-// bytes); out of line, a check costs a compare and a call that passes a few words.
+// Failure paths of the interceptors' invariant checks. They format their typed arguments and call
+// backend.InvariantBroken, which panics. Passing boxed values to it directly would make every
+// checking function reserve stack space for the boxing; out of line, a check costs a compare and a
+// short call.
 
 // checkServerSpan checks that the span the SDK started for a server call is valid and continues the
 // trace of the caller (the remote parent on caller, if there is one).  Out of line, so that the two

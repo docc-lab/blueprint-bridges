@@ -1,7 +1,7 @@
 package interceptors
 
-// Tomislav-RetCtx: what only the HTTP middleware has to get right (the shared behaviour is tested
-// over both transports in interceptors_test.go).
+// What only the HTTP middleware has to get right; the shared behaviour is tested over both transports
+// in interceptors_test.go.
 
 import (
 	"context"
@@ -46,7 +46,7 @@ func tracedClient(t *testing.T, tracer backend.Tracer, kind string) *http.Client
 func TestHTTPRetCtxWithoutWrites(t *testing.T) {
 	t.Setenv("REVERSE_TRUSS", "on")
 	rec, tracer := newRecorder(sdktrace.AlwaysSample())
-	ret := backend.EncodeCheckpointRetCtx(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 1, backend.SegPathCheckpoint, nil) // Tomislav-RetCtx: the kind live code passes, so the envelope is packed
+	ret := backend.EncodeCheckpointRetCtx(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 1, backend.SegPathCheckpoint, nil) // the kind live code passes, so the envelope is packed
 	for _, tc := range []struct {
 		name    string
 		handler http.HandlerFunc

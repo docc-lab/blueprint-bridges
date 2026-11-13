@@ -24,46 +24,38 @@ func clientInterceptor(tp trace.TracerProvider, v variant, attrBaggage bool) grp
 		// setting is the same for every process of a deployment and fixed while it runs.  So read
 		// it once, and only ask gRPC for the response trailer when there can be something in it:
 		// collecting the trailer costs an extra call option and a copy of the trailer on every call.
-		reverse: backend.ReverseTrussEnabled(),               // runtime/core/backend/reversetruss.go
-		methods: &methodCache{tp: tp, side: clientSpanNames}, // interceptors.go
+		reverse: backend.ReverseTrussEnabled(),
+		methods: &methodCache{tp: tp, side: clientSpanNames},
 	}
-	// The per-call path.
-	//
-	// Its stack frame stays on the stack for the whole downstream call, and while the OTel SDK and the
-	// bridge processor start the span.  So it is kept small and does little itself: the work before and
-	// after the span start and the call happens in helpers whose frames are gone by then.  Why it
-	// matters: with interceptors the span starts below three gRPC/Blueprint frames that sit above it with
-	// wrappers (Blueprint's client, the gRPC stub, ClientConn.Invoke: about 400 bytes).  When everything
-	// was in one function, this frame was 688 bytes and SB's goroutines grew (copied) their stacks
-	// noticeably more often than with wrappers (README, "Profiling").  Now it is 288 bytes; the
-	// generated client wrapper's frame is 760.  (go build -gcflags=-S prints frame sizes as "locals".)
-	// (The body is in this closure itself, not in a method it calls: a method call, or a method
-	// value like c.intercept, would add one more frame under everything the call does.)
+	// The per-call path. Its stack frame stays on the stack during the whole downstream call and while
+	// the SDK and the span processor start the span, so it is kept small: the work before and after
+	// the span start and the call is done in helpers whose frames are gone by then. (The body is in the
+	// closure itself: calling a method from here would add another frame under everything.)
 	return func(ctx context.Context, fullMethod string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		// 1. Unsampled parent: forward only the compact carrier so downstream stays unsampled.
-		if unsampledParent(ctx) { // below
-			return invokeUnsampled(ctx, fullMethod, req, reply, cc, invoker, opts) // below
+		if unsampledParent(ctx) {
+			return invokeUnsampled(ctx, fullMethod, req, reply, cc, invoker, opts)
 		}
 
 		var call clientCall
-		ctx, baggage := c.prepare(&call, ctx) // below: steps 2-3
+		ctx, baggage := c.prepare(&call, ctx) // steps 2-3
 
 		// 4. The client span (started right here, so no helper frame sits under the SDK's work).
-		m := c.methods.get(fullMethod) // interceptors.go: span name and tracer, cached per method
+		m := c.methods.get(fullMethod) // span name and tracer, cached per method
 		ctx, call.span = m.tracer.Start(ctx, m.spanName, trace.WithSpanKind(trace.SpanKindClient))
 		defer call.span.End()
 
-		call.ctx = carry(ctx, call.span, baggage, c.attrBaggage) // below: step 5
-		putBaggage(baggage)                                      // below: the map was only needed for the carrier
+		call.ctx = carry(ctx, call.span, baggage, c.attrBaggage) // step 5
+		putBaggage(baggage)                                      // the map was only needed for the carrier
 
 		// 6. The call.
 		var err error
 		if c.reverse {
-			err = c.invokeWithTrailer(&call, fullMethod, req, reply, cc, invoker, opts) // below: steps 6-7
+			err = c.invokeWithTrailer(&call, fullMethod, req, reply, cc, invoker, opts) // steps 6-7
 		} else {
 			err = invoker(call.ctx, fullMethod, req, reply, cc, opts...)
 		}
-		c.finish(&call, err) // below: step 8
+		c.finish(&call, err) // step 8
 		return err
 	}
 }
@@ -89,17 +81,16 @@ type clientCall struct {
 // prepare does steps 2-3 and returns the context to start the span with and the baggage to send.
 func (c *clientSide) prepare(call *clientCall, ctx context.Context) (context.Context, map[string]string) {
 	// 2. Copy so we never change the parent's baggage map.
-	baggage := copyBaggage(ctx) // below
+	baggage := copyBaggage(ctx)
 
 	// 3. Bridges: take the next child ordinal from the enclosing server's counter.  Like the
 	//    wrappers, this requires the caller to run inside a traced server (which sets the counter).
 	if c.v.countChildren {
-		// Tomislav-RetCtx: checked type assertions, so a call from outside a traced request (no
-		// server put the counter on ctx: BUG_REPORT.md F-08) panics naming the rule it broke, in
-		// both versions, instead of with a bare type-assertion error.
+		// Checked type assertions, so a call from outside a traced request panics naming the rule it
+		// broke rather than with a bare type-assertion error.
 		childCount, ok := ctx.Value("childCount").(*atomic.Uint64)
 		if !ok {
-			brokenValue("a bridge client call runs inside a traced request (child counter on the context)", "kind", c.v.name) // invariants.go
+			brokenValue("a bridge client call runs inside a traced request (child counter on the context)", "kind", c.v.name)
 		}
 		if c.v.endEvents {
 			if call.endEvents, ok = ctx.Value("endEvents").(*[]int); !ok {
@@ -110,7 +101,7 @@ func (c *clientSide) prepare(call *clientCall, ctx context.Context) (context.Con
 			}
 		}
 		call.seqNum = int(childCount.Add(1))
-		if call.seqNum < 1 { // Tomislav-RetCtx: the first child is 1; int(uint64) wraps past MaxInt
+		if call.seqNum < 1 { // the first child is 1; int(uint64) wraps past MaxInt
 			brokenCount("a child ordinal is >= 1", "seqNum", call.seqNum, 1)
 		}
 		ctx = context.WithValue(ctx, "seqNum", call.seqNum) // read by the processor when our span starts
@@ -121,27 +112,27 @@ func (c *clientSide) prepare(call *clientCall, ctx context.Context) (context.Con
 
 // carry does step 5 for a gRPC call: the carrier goes in the request metadata of the returned context.
 func carry(ctx context.Context, span trace.Span, baggage map[string]string, attrBaggage bool) context.Context {
-	return withOutgoingTraceCtx(ctx, carrierFor(span, baggage, attrBaggage)) // below
+	return withOutgoingTraceCtx(ctx, carrierFor(span, baggage, attrBaggage))
 }
 
 // carrierFor does step 5 on any transport: merge the baggage the processor attached to the new span
 // and encode the carrier for the callee.  Used by carry (gRPC) and the HTTP client middleware
 // (http_client.go).
 func carrierFor(span trace.Span, baggage map[string]string, attrBaggage bool) string {
-	mergeSpanBaggage(span, baggage, attrBaggage)      // interceptors.go
-	checkClientSpan(span)                             // Tomislav-RetCtx: invariants.go
-	return encodeCarrier(span.SpanContext(), baggage) // carrier.go
+	mergeSpanBaggage(span, baggage, attrBaggage)
+	checkClientSpan(span)
+	return encodeCarrier(span.SpanContext(), baggage)
 }
 
 // invokeWithTrailer makes the call collecting the server's trailer, which carries the reverse
 // context (step 6), and handles the reverse context (step 7).
 func (c *clientSide) invokeWithTrailer(call *clientCall, fullMethod string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts []grpc.CallOption) error {
-	t := trailerCatchers.Get().(*trailerCatcher) // below
+	t := trailerCatchers.Get().(*trailerCatcher)
 	t.opts = append(append(t.opts[:0], opts...), t.opt)
 	err := invoker(call.ctx, fullMethod, req, reply, cc, t.opts...)
 	retCtx := ""
 	if err == nil {
-		retCtx = retCtxFromTrailer(t.md) // below
+		retCtx = retCtxFromTrailer(t.md)
 	}
 	// gRPC is done with the options and the trailer once the call returned: put them back.
 	t.md = nil
@@ -151,7 +142,7 @@ func (c *clientSide) invokeWithTrailer(call *clientCall, fullMethod string, req,
 	// 7. With wrappers a failed call returns no retCtx; the server does not send one then either,
 	//    so only look on success.
 	if err == nil {
-		finishClientRetCtx(call.ctx, c.tp, call.span, retCtx) // below
+		finishClientRetCtx(call.ctx, c.tp, call.span, retCtx)
 	}
 	return err
 }
@@ -193,13 +184,13 @@ func unsampledParent(ctx context.Context) bool {
 // invokeUnsampled makes a call under an unsampled parent: no span, only the compact carrier so the
 // callee stays in the same (unsampled) trace.
 func invokeUnsampled(ctx context.Context, fullMethod string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts []grpc.CallOption) error {
-	carrier := encodeUnsampledCarrier(trace.SpanContextFromContext(ctx)) // carrier.go
+	carrier := encodeUnsampledCarrier(trace.SpanContextFromContext(ctx))
 	return invoker(withOutgoingTraceCtx(ctx, carrier), fullMethod, req, reply, cc, opts...)
 }
 
 // withOutgoingTraceCtx attaches the forward carrier to the outgoing request metadata.
 func withOutgoingTraceCtx(ctx context.Context, carrier string) context.Context {
-	return metadata.AppendToOutgoingContext(ctx, TraceCtxKey, carrier) // TraceCtxKey: interceptors.go
+	return metadata.AppendToOutgoingContext(ctx, TraceCtxKey, carrier)
 }
 
 // copyBaggage returns a copy of the baggage on ctx (empty map if none), so the caller can change it
@@ -208,7 +199,7 @@ func withOutgoingTraceCtx(ctx context.Context, carrier string) context.Context {
 // entries to it), so the maps come from a pool; putBaggage returns them.
 func copyBaggage(ctx context.Context) map[string]string {
 	baggage := baggageMaps.Get().(map[string]string)
-	for k, v := range backend.GetBaggageFromContext(ctx) { // runtime/core/backend/trace.go
+	for k, v := range backend.GetBaggageFromContext(ctx) {
 		baggage[k] = v
 	}
 	return baggage
@@ -226,11 +217,11 @@ var baggageMaps = sync.Pool{New: func() any { return make(map[string]string, 8) 
 // Indexes the map directly: gRPC stores received keys in lower case, and MD.Get would lower-case
 // RetCtxKey (already lower case) on every call.
 func retCtxFromTrailer(trailer metadata.MD) string {
-	if v := trailer[RetCtxKey]; len(v) > 0 { // RetCtxKey: interceptors.go
-		if len(v) > 1 { // Tomislav-RetCtx: the server sets exactly one (server.go, setRetCtxTrailer)
+	if v := trailer[RetCtxKey]; len(v) > 0 {
+		if len(v) > 1 { // the server sets exactly one
 			brokenCount("one reverse context per response", "values", len(v), 1)
 		}
-		return retCtxFromHeader(v[0]) // header.go
+		return retCtxFromHeader(v[0])
 	}
 	return ""
 }
@@ -242,8 +233,8 @@ func finishClientRetCtx(ctx context.Context, tp trace.TracerProvider, span trace
 	if retCtx == "" {
 		return
 	}
-	if out, prepared := backend.PrepareCheckpoint(tp, span, retCtx); prepared { // runtime/core/backend/checkpoint.go
+	if out, prepared := backend.PrepareCheckpoint(tp, span, retCtx); prepared {
 		retCtx = out
 	}
-	backend.AddToMerge(ctx, retCtx) // runtime/core/backend/reversetruss.go
+	backend.AddToMerge(ctx, retCtx)
 }

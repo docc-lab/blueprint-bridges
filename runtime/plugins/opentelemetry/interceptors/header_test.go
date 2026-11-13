@@ -65,11 +65,10 @@ func TestHeaderTextNotHuffmanCoded(t *testing.T) {
 // bytes), and the header text is always printable ASCII.
 func TestRetCtxHeaderRoundTrip(t *testing.T) {
 	r := rand.New(rand.NewSource(2))
-	real := backend.EncodeCheckpointRetCtx(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 3, backend.SegPathCheckpoint, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9}) // Tomislav-RetCtx: the kind live code passes (a literal "pb" made the legacy JSON envelope)
+	real := backend.EncodeCheckpointRetCtx(trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}, 3, backend.SegPathCheckpoint, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9}) // the kind live code passes, so the envelope is packed
 	cases := []string{real, ""}
 	for i := 0; i < 2000; i++ {
-		// Tomislav-RetCtx: any bytes behind the packed envelope's version byte (real[0]), the only
-		// form a server sends (retCtxFromHeader checks it).
+		// Any bytes after the packed envelope's version byte (real[0]), the only form a server sends.
 		b := make([]byte, 1+r.Intn(400)) // also longer than any stack buffer
 		r.Read(b[1:])
 		b[0] = real[0]
@@ -86,15 +85,15 @@ func TestRetCtxHeaderRoundTrip(t *testing.T) {
 			t.Fatalf("round trip changed %q to %q", s, got)
 		}
 	}
-	// Tomislav-RetCtx: a value that does not decode, or is not a packed envelope (here the legacy
-	// JSON envelope, which no service sends any more), breaks an invariant.
+	// A value that does not decode, or is not a packed envelope (here the legacy JSON envelope),
+	// breaks an invariant.
 	mustBreakInvariant(t, "malformed value", func() { retCtxFromHeader("ab cd") })
 	mustBreakInvariant(t, "legacy envelope", func() {
 		retCtxFromHeader(retCtxHeader(base64.StdEncoding.EncodeToString([]byte(`{"fp":"0102030405060708"}`))))
 	})
 }
 
-// mustBreakInvariant fails the test unless f panics with a *backend.InvariantError.  Tomislav-RetCtx.
+// mustBreakInvariant fails the test unless f panics with a *backend.InvariantError.
 func mustBreakInvariant(t *testing.T, name string, f func()) {
 	t.Helper()
 	defer func() {

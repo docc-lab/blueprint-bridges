@@ -7,14 +7,9 @@ import (
 	"github.com/blueprint-uservices/blueprint/runtime/core/backend"
 )
 
-// How the interceptors' two values are written as header text.
-//
-// gRPC sends metadata as HTTP/2 headers, which are compressed with HPACK.  HPACK Huffman-codes a
-// header value whenever that makes it shorter, and base64 text always gets shorter (its letters
-// and digits have short codes, about 6.5 bits per character).  So with ordinary base64, every call
-// paid for Huffman coding our values on the sending side and decoding them on the receiving side
-// (x/net's decoder works byte by byte).  In the PB profiles that was most of the interceptors'
-// extra header-compression CPU (utils/grpc_interceptors/README.md, "Huffman-proof header text").
+// gRPC sends metadata as HTTP/2 headers, compressed with HPACK. HPACK Huffman-codes a value whenever
+// that makes it shorter, and ordinary base64 always gets shorter, so every call would pay for
+// Huffman coding on both sides.
 //
 // headerAlphabet is a base64 alphabet made of the visible ASCII characters with the LONGEST
 // Huffman codes (8 to 15 bits for the first 23, 7 for the next 32, 6 for the last 9), so that a
@@ -47,20 +42,19 @@ func retCtxHeader(retCtx string) string {
 // retCtxFromHeader turns a trailer or header value back into the reverse context the server's
 // backend produced.  Called by the client side (client.go, http_client.go).
 //
-// Tomislav-RetCtx: only a traced server writes this value (retCtxHeader above, from a packed
-// envelope), so one that does not decode, or decodes to anything but a packed envelope, is a bug
-// on that side (it used to be dropped as "").
+// Only a traced server writes this value, always from a packed envelope, so anything else is a bug
+// on that side.
 func retCtxFromHeader(v string) string {
 	if v == "" {
 		return ""
 	}
 	raw, err := headerEncoding.DecodeString(v)
 	if err != nil {
-		backend.InvariantBroken("the reverse context header decodes", err) // runtime/core/backend/invariant.go
+		backend.InvariantBroken("the reverse context header decodes", err)
 	}
 	retCtx := unsafe.String(unsafe.SliceData(raw), len(raw)) // raw is never written again
 	if !backend.IsPackedRetCtx(retCtx) {
-		brokenCount("the reverse context received is a packed envelope", "length", len(raw), 0) // invariants.go
+		brokenCount("the reverse context received is a packed envelope", "length", len(raw), 0)
 	}
 	return retCtx
 }
