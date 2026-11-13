@@ -37,15 +37,14 @@ type traceCtxWithBaggage struct {
 	TraceCtx traceCtx `json:"trace_ctx"`
 	// Baggage for propagating arbitrary key-value pairs across service boundaries
 	Baggage map[string]string `json:"baggage,omitempty"`
-	// Tomislav-RetCtx: baggage values that are not valid UTF-8, base64 (carrier_json.go,
-	// splitBinaryBaggage).
+	// Baggage values that are not valid UTF-8, as base64 (see splitBinaryBaggage).
 	BaggageBin map[string]string `json:"baggage_bin,omitempty"`
 }
 
 // Utility function to convert an encoded string into a Span Context
 func GetSpanContext(encoded_string string) (trace.SpanContextConfig, map[string]string, error) {
-	// Tomislav-RetCtx: the carriers the wrappers send decode without reflection
-	// (carrier_json.go); anything else goes through encoding/json as before.
+	// The carriers the wrappers send decode without reflection; anything else goes through
+	// encoding/json.
 	tCtx, fast := parseCarrierFast(encoded_string)
 	if !fast {
 		tCtx = traceCtxWithBaggage{}
@@ -85,7 +84,7 @@ func GetSpanContext(encoded_string string) (trace.SpanContextConfig, map[string]
 
 // AddBaggageToTraceContext takes an already JSON-ified trace context string and adds baggage to it
 func AddBaggageToTraceContext(traceContextJSON string, baggage map[string]string) (string, error) {
-	// Tomislav-RetCtx: reflection-free fast path, same bytes (carrier_json.go).
+	// Reflection-free fast path; same bytes.
 	if out, ok := addBaggageFast(traceContextJSON, baggage); ok {
 		return out, nil
 	}
@@ -108,8 +107,7 @@ func AddBaggageToTraceContext(traceContextJSON string, baggage map[string]string
 }
 
 // IsBaggageKey says whether key is the context key under which GetBaggageFromContext looks up the
-// baggage (a map[string]string).  Tomislav-RetCtx: for context types that answer several keys from
-// one layer instead of adding one layer per value.
+// baggage (a map[string]string), for context types that answer several keys from one layer.
 func IsBaggageKey(key any) bool {
 	_, ok := key.(baggageKey)
 	return ok

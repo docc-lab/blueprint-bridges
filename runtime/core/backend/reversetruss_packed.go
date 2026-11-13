@@ -1,14 +1,6 @@
 package backend
 
-// Tomislav-RetCtx: the reverse path's wire codec, packed the same way the forward
-// path packs `_br` -- explicit bytes and a single base64.RawURLEncoding, no JSON.
-//
-// The forward path has always done this (otelcol.encodeBR is one RawURLEncoding of
-// already-packed varints). The reverse path built the same packed bytes and then
-// handed them to encoding/json as a []byte field, so json base64'd the payload, the
-// envelope was base64'd again, and every hop and fan-in paid a reflective marshal
-// round-trip to append to a list or decrement one byte. This file removes that
-// envelope; the payload bytes themselves are unchanged.
+// The packed reverse-context envelope: explicit bytes, no JSON.
 //
 // Wire format (version 1):
 //
@@ -17,32 +9,20 @@ package backend
 //	tag      := kind(low 3 bits) | 0x08 when a reverse TTL is present
 //	body     := [ttl] || data        (data == spanID(8) || uvarint(depth) || truss)
 //
-// `data` is byte-identical to what TrussSegment.Data has always held, so the
-// segment payload and its interpretation are untouched -- only the container
-// changes. Fields the checkpoint path never reads are simply not transmitted:
+// data is exactly TrussSegment.Data. Fields the checkpoint path never reads are not sent:
 //
-//   - fp: it is spanID.String(), and those same 8 bytes already head `data`.
-//     It is derived on decode instead, so DecodeRetCtx still reports it.
-//   - m, k: Bloom geometry belonging to legacy SegAMQ segments, which checkpoint
-//     consumers ignore (they read the descriptor inside each embedded SDK truss).
-//   - the segment kind as a 13-character string: it is a closed set of four, so
-//     one byte carries it.
+//   - fp: it is spanID.String(), and those 8 bytes already start data; it is derived when read.
+//   - m, k: Bloom geometry of legacy SegAMQ segments, which checkpoint consumers ignore.
+//   - the segment kind as a string: it is one of four, so one byte carries it.
 //
-// Envelopes that carry anything else -- a legacy ancestry SegAMQ segment from
-// BuildRetCtx, or a parent fingerprint -- keep the JSON envelope. Version 1 is
-// therefore checkpoint-only by construction, and decodePackedRetCtx refuses
-// anything it does not fully understand so a mixed bundle can never be
-// silently truncated.
+// Envelopes with anything else (a legacy SegAMQ segment from BuildRetCtx, or a parent fingerprint)
+// keep the JSON envelope, so version 1 is checkpoint-only, and decodePackedRetCtx refuses anything it
+// does not fully understand rather than truncate a mixed bundle.
 //
-// Tomislav-RetCtx (2026-10-14): in the process the packed envelope is its raw
-// bytes in a Go string, not their base64.  The text form used to be decoded and
-// re-encoded at every step of a hop with nothing changed in between: each child
-// added to the fan-in (the whole accumulator each time), each checkpoint
-// preparation, and twice more by the gRPC interceptors to put it in a header.
-// Text is made only where text has to travel (RetCtxText / RetCtxFromText below):
-// the wrappers' response field, and the exported `_rc` attribute, whose format is
-// unchanged.  A raw envelope starts with the version byte 0x01, which no base64
-// alphabet contains, so raw and text forms cannot be confused.
+// In the process the envelope is its raw bytes in a Go string. Text is made only where text has to
+// travel (RetCtxText / RetCtxFromText): the wrappers' response field and the exported `_rc`
+// attribute. A raw envelope starts with the version byte 0x01, which no base64 alphabet contains,
+// so the two forms cannot be confused.
 
 import (
 	"encoding/base64"
@@ -205,8 +185,8 @@ func decodePackedRetCtx(s string) (trussData, bool) {
 		raw = raw[uint64(1+n)+size:]
 	}
 	// fp is not transmitted: it is the span IDs that already head each segment's Data.
-	// Tomislav-RetCtx: it is derived where it is read (fingerprint, below), not on every decode:
-	// routing decodes on every hop and never reads it.
+	// It is derived where it is read (fingerprint), since routing decodes at every hop and never
+	// reads it.
 	return t, true
 }
 

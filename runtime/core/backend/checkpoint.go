@@ -11,8 +11,8 @@ import (
 // retCtx on the RPC response; it must not enter forward request baggage.
 const ReverseBaggageKey = "__bag.rev"
 
-// Tomislav-RetCtx: ReverseTrussInputKey passes received trusses to the SDK on a live span.
-// Only the SDK decides whether to consume them or return them in __bag.rev.
+// ReverseTrussInputKey passes received trusses to the SDK on a live span. The SDK alone decides
+// whether to absorb them or pass them on in __bag.rev.
 const ReverseTrussInputKey = "__bag.rev_in"
 
 // IsReverseBaggageKey identifies private return carriers and SDK decision state.
@@ -25,17 +25,15 @@ func IsReverseBaggageKey(key attribute.Key) bool {
 // hook finalizes checkpointing while the span is still mutable: OTel OnEnd gets
 // a read-only snapshot, which is too late to write reverse baggage.
 type CheckpointPreparer interface {
-	// Returns the carrier to forward upstream. Tomislav-RetCtx: returning it means
-	// the caller does not have to read it back off the span. Reading a recording
-	// span's attributes locks it and runs a full dedupe pass with a fresh map, so a
-	// read-back costs far more than passing the value.
+	// It returns the reverse context to pass upstream, so the caller need not read it back off
+	// the span (which locks the span and dedupes its attributes).
 	PrepareCheckpoint(span trace.Span, returned string) string
 }
 
-// Tomislav-RetCtx: PrepareCheckpoint asks the SDK to finish its checkpoint decision. Call once,
-// after attaching received trusses and final span attributes, before reading
-// reverse baggage and ending the span. False means no SDK decision was possible;
-// instrumentation must forward the received trusses unchanged in that case.
+// PrepareCheckpoint asks the SDK to finish its checkpoint decision. Call it once, after attaching the
+// received trusses and the final span attributes, and before reading reverse baggage and ending the
+// span. False means the SDK could not decide; the instrumentation must then pass the received
+// trusses on unchanged.
 func PrepareCheckpoint(provider trace.TracerProvider, span trace.Span, returned string) (string, bool) {
 	if !span.IsRecording() {
 		return "", false
@@ -46,9 +44,9 @@ func PrepareCheckpoint(provider trace.TracerProvider, span trace.Span, returned 
 	return "", false
 }
 
-// ServerCheckpointPreparer is a CheckpointPreparer that can take a server span's child count from
-// the caller.  Tomislav-RetCtx: the SDK otherwise reads it back from the span's children
-// attributes, and reading a live span's attributes locks it and copies them through a map.
+// ServerCheckpointPreparer is a CheckpointPreparer that takes a server span's child count from the
+// caller; otherwise the SDK reads it back from the span's attributes, which locks the span and copies
+// them through a map.
 type ServerCheckpointPreparer interface {
 	PrepareServerCheckpoint(span trace.Span, returned string, children int) string
 }

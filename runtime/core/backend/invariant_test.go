@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Tomislav-RetCtx: InvariantBroken panics with an *InvariantError naming the rule and the values.
+// InvariantBroken panics with an *InvariantError naming the rule and the values.
 func TestInvariantBroken(t *testing.T) {
 	defer func() {
 		r := recover()
@@ -26,7 +26,7 @@ func TestInvariantBroken(t *testing.T) {
 	t.Fatal("InvariantBroken returned")
 }
 
-// Tomislav-RetCtx: IsPackedRetCtx accepts exactly what the backend's packed envelope starts with.
+// IsPackedRetCtx accepts exactly what a packed envelope starts with.
 func TestIsPackedRetCtx(t *testing.T) {
 	merged := MergeRetCtx(string([]byte{packedRetCtxVersion}), "")
 	for _, c := range []struct {

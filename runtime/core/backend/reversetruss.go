@@ -1,6 +1,7 @@
 package backend
 
-// Reverse-truss (retCtx) support - split out of trace.go per Raja
+// The reverse context (retCtx): trusses that travel back up the call path in responses, so a span
+// above can export them as a checkpoint when the span that produced them could not.
 import (
 	"context"
 	"encoding/base64"
@@ -21,20 +22,13 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Legacy ancestry-only AMQ geometry, sourced from the fixed-distance SDK or
-// environment. These parameters describe SegAMQ payloads, not complete SDK
-// checkpoint segments. Ranged PB/CGPB checkpoints carry their own immutable
-// window distance inside each truss, so mixed window sizes survive fan-in.
-// The legacy AMQ geometry is not a fixed constant:
-//  1. SetRTBloomParams(m,k) is called by the otelcol bridge processor when it
-//     sizes its own Bloom for the discovered cpd (checkpoint distance) -> reverse == forward geometry
-//  2. Standalone fallback (synthetic trees, or any service without bridge
-//     processor) reads it from env at startup:
-//     RT_BLOOM_CAP expected #elements (default 8)
-//     RT_BLOOM_FPR target FP rate (default 0.0001 == otelcol.DefaultBloomFPRate)
+// Bloom geometry of legacy ancestry segments (SegAMQ). Checkpoint segments carry their own window
+// distance in each truss instead, so windows of different sizes survive fan-in. The geometry comes
+// from the bridge processor (SetRTBloomParams, sized for its checkpoint distance) or, without one,
+// from the environment at startup:
 //
-// Legacy AMQ envelopes record (m,k); windowed checkpoint consumers instead
-// derive geometry from the descriptor in each embedded SDK truss.
+//	RT_BLOOM_CAP  expected number of elements (default 8)
+//	RT_BLOOM_FPR  target false-positive rate (default 0.0001)
 var (
 	rtBloomM atomic.Uint64
 	rtBloomK atomic.Uint32
@@ -54,8 +48,7 @@ func init() {
 	rtBloomK.Store(uint32(k))
 }
 
-// SetRTBloomParams lets the SDK source reverse-truss Bloom geometry from the
-// forward bridge's live geometry (called from runtime/plugins/otelcol).
+// SetRTBloomParams sets the legacy segment geometry to the bridge processor's (runtime/plugins/otelcol).
 func SetRTBloomParams(m uint64, k uint) {
 	if m > 0 && k > 0 {
 		rtBloomM.Store(m)
@@ -65,13 +58,12 @@ func SetRTBloomParams(m uint64, k uint) {
 
 func rtBloom() (uint64, uint) { return rtBloomM.Load(), uint(rtBloomK.Load()) }
 
-// Generalized truss payload
+// TrussSegment is one piece of a reverse context.
 type TrussSegment struct {
 	Kind string `json:"k"` // amq | hash | ordinal | ee | dee | ...
 	Data []byte `json:"d,omitempty"`
-	// Tomislav-RetCtx: each returned truss counts down independently. A nil
-	// TTL uses the receiving SDK's probability policy, or waits for an original
-	// checkpoint when that SDK uses the default TTL policy.
+	// TTL counts down independently for each returned truss. A nil TTL leaves the decision to the
+	// receiving SDK's probability policy, or, with the TTL policy, to the next scheduled checkpoint.
 	ReverseTTL *byte `json:"ttl,omitempty"`
 }
 
@@ -99,9 +91,8 @@ type trussData struct {
 }
 
 func encodeTruss(t trussData) string {
-	// Tomislav-RetCtx: checkpoint-only envelopes pack like the forward path.
-	// Anything carrying a legacy ancestry segment or a parent fingerprint keeps
-	// the JSON envelope, which stays readable by older peers.
+	// Envelopes of checkpoint segments only are packed like the forward path. Anything with a legacy
+	// ancestry segment or a parent fingerprint keeps the JSON envelope.
 	if packableRetCtx(t) {
 		return encodePackedRetCtx(t.Segs)
 	}
@@ -114,13 +105,13 @@ func decodeTruss(s string) (trussData, bool) {
 	if s == "" {
 		return t, false
 	}
-	// Packed envelopes are raw bytes starting with a version byte (or, as text,
-	// their RawURLEncoding: RetCtxText); JSON envelopes are StdEncoding and start
-	// with '{'. None can be mistaken for another, so all decode without sniffing.
+	// Packed envelopes are raw bytes starting with a version byte (as text, their RawURLEncoding:
+	// RetCtxText); JSON envelopes are StdEncoding and start with '{'. They cannot be mistaken for each
+	// other.
 	if packed, ok := decodePackedRetCtx(s); ok {
 		return packed, true
 	}
-	if raw := RetCtxFromText(s); raw != s { // reversetruss_packed.go
+	if raw := RetCtxFromText(s); raw != s {
 		return decodePackedRetCtx(raw)
 	}
 	raw, err := base64.StdEncoding.DecodeString(s)
@@ -133,9 +124,9 @@ func decodeTruss(s string) (trussData, bool) {
 	return t, true
 }
 
-// ReturnedCheckpoint describes where a truss was meant to be checkpointed.
-// Forwarding and fan-in preserve this origin, even when a different span later
-// checkpoints the truss. Truss contains the SDK's exact pre-reset _br bytes.
+// ReturnedCheckpoint is a truss with the location it was meant to be checkpointed at. Forwarding and
+// fan-in keep that origin, even when another span ends up exporting it. Truss is the SDK's `_br`
+// bytes, before any reset.
 type ReturnedCheckpoint struct {
 	Kind       string
 	SpanID     trace.SpanID
@@ -144,15 +135,14 @@ type ReturnedCheckpoint struct {
 	ReverseTTL *byte
 }
 
-// EncodeCheckpointRetCtx packs the original span ID and a binary varint depth
-// with the truss. The existing string retCtx envelope carries the segment.
+// EncodeCheckpointRetCtx encodes one checkpoint segment (span ID, depth, truss) as a reverse context.
 func EncodeCheckpointRetCtx(spanID trace.SpanID, depth uint64, kind string, truss []byte) string {
 	return encodeCheckpointRetCtx(spanID, depth, kind, truss, nil)
 }
 
-// Tomislav-RetCtx: the mutable reverse TTL is separate from the immutable
-// spanID || depth || truss payload. Distance D starts with TTL D-1; the next
-// upstream span consumes zero or forwards a decremented copy.
+// EncodeCheckpointRetCtxWithTTL is EncodeCheckpointRetCtx with a reverse TTL, kept apart from the
+// immutable spanID || depth || truss payload. Distance D starts at TTL D-1; each span upstream
+// either absorbs the truss at TTL 0 or passes it on with the TTL decremented.
 func EncodeCheckpointRetCtxWithTTL(spanID trace.SpanID, depth uint64, kind string, truss []byte, ttl byte) string {
 	return encodeCheckpointRetCtx(spanID, depth, kind, truss, &ttl)
 }
@@ -209,25 +199,24 @@ func decodeCheckpointSegment(segment TrussSegment) (ReturnedCheckpoint, bool, er
 	}, true, nil
 }
 
-// RouteRetCtx partitions one upstream hop into checkpointed and forwarded
-// segments. Tomislav-RetCtx: only an original checkpoint consumes the whole
-// bundle. A TTL-created checkpoint consumes just the expired segments, leaving
-// other TTLs independent. Merging siblings itself never spends a hop.
+// RouteRetCtx splits a reverse context, at one span, into the part it checkpoints and the part it
+// forwards. A scheduled checkpoint absorbs the whole bundle; any other span absorbs only the
+// segments whose TTL ran out, so the others keep counting independently. Merging siblings costs no
+// hop.
 func RouteRetCtx(retCtx string, originalCheckpoint bool) (checkpointed, forwarded string) {
 	return RouteRetCtxWithDecision(retCtx, originalCheckpoint, nil)
 }
 
-// Tomislav-RetCtx: the SDK may independently accept each valid TTL-free truss.
-// Existing TTL segments keep their countdown, including in mixed bundles.
-// Nil accept retains the default TTL/legacy behavior; malformed or unknown
-// TTL-free segments wait for an original checkpoint to absorb the whole bundle.
+// RouteRetCtxWithDecision is RouteRetCtx with accept deciding on each valid truss that has no TTL.
+// Segments with a TTL keep counting down. A nil accept gives RouteRetCtx; malformed or unknown
+// segments without a TTL wait for a scheduled checkpoint to absorb the bundle.
 func RouteRetCtxWithDecision(retCtx string, originalCheckpoint bool, accept func(ReturnedCheckpoint) bool) (checkpointed, forwarded string) {
 	if retCtx == "" || originalCheckpoint {
 		return retCtx, ""
 	}
 	t, ok := decodeTruss(retCtx)
 	if !ok || len(t.Segs) == 0 {
-		return "", retCtx // Preserve opaque/legacy context until a checkpoint.
+		return "", retCtx // keep an opaque or legacy context for a checkpoint
 	}
 	var emitted, pending []TrussSegment
 	changedTTL := false
@@ -249,8 +238,7 @@ func RouteRetCtxWithDecision(retCtx string, originalCheckpoint bool, accept func
 		}
 		pending = append(pending, segment)
 	}
-	// Tomislav-RetCtx: failed probability trials leave the carrier untouched;
-	// avoid reserializing a potentially large fan-in bundle at every such hop.
+	// Nothing absorbed: return the carrier unchanged rather than re-encode a possibly large bundle.
 	if len(emitted) == 0 && !changedTTL {
 		return "", retCtx
 	}
@@ -262,13 +250,12 @@ func encodeTrussSubset(envelope trussData, segments []TrussSegment) string {
 		return ""
 	}
 	envelope.Segs = segments
-	// Tomislav-RetCtx: a checkpoint-only partition packs, and its fingerprints are
-	// derived from each segment's own span ID on decode rather than transmitted.
+	// A checkpoint-only partition packs; its fingerprints are derived from each segment's span ID.
 	if packableRetCtx(envelope) {
 		return encodePackedRetCtx(segments)
 	}
-	// Checkpoint origins belong only to their partition. Older ancestry-only
-	// segments have envelope-level fingerprints, so retain those when present.
+	// Checkpoint origins stay with their partition. Legacy ancestry segments have envelope-level
+	// fingerprints, so keep those if present.
 	var fingerprints []string
 	for _, segment := range segments {
 		switch segment.Kind {
@@ -287,8 +274,8 @@ func encodeTrussSubset(envelope trussData, segments []TrussSegment) string {
 	return encodeTruss(envelope)
 }
 
-// DecodeRetCtx exposes a truss's fingerprints, parent, Bloom geometry, and its
-// AMQ segments (used by ancestry verifier / sample logger).
+// DecodeRetCtx returns a reverse context's fingerprints, parent, Bloom geometry and ancestry segments,
+// for the ancestry verifier and the sample logger.
 func DecodeRetCtx(s string) (fp, parent string, m uint64, k uint, amqs [][]byte) {
 	t, ok := decodeTruss(s)
 	if !ok {
@@ -299,11 +286,11 @@ func DecodeRetCtx(s string) (fp, parent string, m uint64, k uint, amqs [][]byte)
 			amqs = append(amqs, seg.Data)
 		}
 	}
-	return t.fingerprint(), t.Par, t.M, t.K, amqs // reversetruss_packed.go
+	return t.fingerprint(), t.Par, t.M, t.K, amqs
 }
 
-// BuildRetCtx creates this node's truss: an ancestry Bloom (self + parent
-// fingerprints) as one AMQ segment, concatenated with the children's merged truss.
+// BuildRetCtx creates a node's truss: an ancestry Bloom of its own and its parent's fingerprints as one
+// segment, followed by the children's merged truss. It has no callers left.
 func BuildRetCtx(ctx context.Context, traceCtx string, sc trace.SpanContext) string {
 	m, k := rtBloom()
 	bf := bloom.New(m, k)
@@ -329,8 +316,8 @@ func BuildRetCtx(ctx context.Context, traceCtx string, sc trace.SpanContext) str
 	return MergeRetCtx(MergedChildren(ctx), own)
 }
 
-// MergeRetCtx concatenates two trusses on fan-in: append segment lists, join
-// fingerprints, keep geometry. Empty inputs can pass through.
+// MergeRetCtx concatenates two reverse contexts at fan-in: segment lists appended, fingerprints
+// joined, geometry kept. Either may be empty.
 func MergeRetCtx(a, b string) string {
 	if a == "" {
 		return b
@@ -338,8 +325,7 @@ func MergeRetCtx(a, b string) string {
 	if b == "" {
 		return a
 	}
-	// Tomislav-RetCtx: two packed envelopes concatenate as byte regions. This is
-	// the fan-in path, and it must not cost a decode-and-reserialize per hop.
+	// Two packed envelopes concatenate as bytes; fan-in must not decode and re-encode at every hop.
 	if merged, ok := mergePackedRetCtx(a, b); ok {
 		return merged
 	}
@@ -355,7 +341,7 @@ func MergeRetCtx(a, b string) string {
 	if m == 0 {
 		m, k = tb.M, tb.K
 	}
-	fp := ta.fingerprint() // reversetruss_packed.go
+	fp := ta.fingerprint()
 	if fpb := tb.fingerprint(); fpb != "" {
 		if fp != "" {
 			fp += ","
@@ -370,7 +356,7 @@ func MergeRetCtx(a, b string) string {
 	return encodeTruss(trussData{FP: fp, Par: par, M: m, K: k, Segs: segs})
 }
 
-// Per-request fan-in accumulator
+// The per-request fan-in accumulator.
 type retMergeKey struct{}
 
 // IsRetMergeKey says whether key is the context key under which AddToMerge and MergedChildren look
@@ -380,9 +366,9 @@ func IsRetMergeKey(key any) bool {
 	return ok
 }
 
-// RetMerge is the per-request fan-in accumulator.  Exported (Tomislav-RetCtx) so that a tracer can
-// keep it inside its own per-request context value and answer the key with IsRetMergeKey, instead of
-// adding a separate context layer with WithRetMerge.  Its zero value is ready to use.
+// RetMerge is the per-request fan-in accumulator. It is exported so a tracer can keep it in its own
+// per-request context value (answering IsRetMergeKey) instead of adding a context layer with
+// WithRetMerge. The zero value is ready to use.
 type RetMerge struct {
 	mu sync.Mutex
 	s  string
@@ -409,31 +395,19 @@ func MergedChildren(ctx context.Context) string {
 	return ""
 }
 
-// toggles (runtime env)
+// Settings from the environment.
 func ReverseTrussEnabled() bool { return os.Getenv("REVERSE_TRUSS") == "on" }
 func ParentIDEnabled() bool     { return os.Getenv("RT_PARENTID") == "on" }
 func IsRoot() bool              { return os.Getenv("RT_ROOT") == "on" }
 
-// ReverseTrussCheckpointKey marks a span carrying a consumed reverse truss.
-// Bridge processors give these spans checkpoint priority at export.
-//
-// Tomislav-RetCtx: this is a WIRE key, written on every reverse checkpoint, so it
-// is named like the forward path's `_br`/`_o`/`_d` rather than spelled out. The
-// old "bridges.checkpoint" cost 18 bytes of key text per checkpoint span -- more
-// than the whole packed payload now costs -- for a name no consumer parses.
-//
-// Tomislav-RetCtx (user 2026-10-29): a BRIDGE span no longer exports this key at all; its
-// reverse context travels inside the one `_br` bytes attribute (otelcol/otlp_wire.go
-// appendBridgeWireBytes).  Vanilla, which has no `_br`, still exports `_rc` as text.
+// ReverseTrussCheckpointKey (`_rc`) marks a span that exports a reverse context; the processors
+// export it with checkpoint priority. Bridge spans do not use it: their reverse context is inside
+// their `_br` attribute. Vanilla, which has no `_br`, exports `_rc` as text.
 const ReverseTrussCheckpointKey = "_rc"
 
-// Tomislav-RetCtx: a "bridges.forward_up" marker used to be written beside the
-// carrier on every span that passed a truss upward. Nothing ever read it -- not
-// the audit, which checks the BRIDGES_RT counters instead -- so it was removed
-// rather than shortened. Captures taken before 2026-09-19 still carry it;
-// utils/retctx_wire.py knows the key so those traces stay interpretable.
+// Older captures may also contain a "bridges.forward_up" marker, which is no longer written.
 
-// Counters, dumped periodically + on Ctrl-C / SIGTERM
+// Counters, logged periodically and on SIGINT / SIGTERM.
 var (
 	rtCkpt, rtRecv, rtReject, rtLocal atomic.Uint64
 	rtDumpOnce                        sync.Once
@@ -473,9 +447,7 @@ func CountLocalCheckpoint() { installCounterDump(); rtLocal.Add(1) }
 
 var rtSample atomic.Uint64
 
-// rtSampleN is the sampling period of SampleLogCheckpoint.  Tomislav-RetCtx: RT_SAMPLE is read once,
-// on first use, and fixed for the life of the process (like REVERSE_TRUSS); it used to be read and
-// parsed from the environment on every checkpoint (os.Getenv takes a lock and scans the environment).
+// rtSampleN is the sampling period of SampleLogCheckpoint: RT_SAMPLE, read once.
 var (
 	rtSampleOnce   sync.Once
 	rtSamplePeriod uint64
@@ -491,8 +463,8 @@ func rtSampleN() uint64 {
 	return rtSamplePeriod
 }
 
-// SampleLogCheckpoint logs ~1/RT_SAMPLE checkpoints with their original
-// locations so the raw retCtx can be inspected using TestRTVerify.
+// SampleLogCheckpoint logs about one in RT_SAMPLE checkpoints with their origin, so the raw reverse
+// context can be inspected with TestRTVerify.
 func SampleLogCheckpoint(retCtx string) {
 	if rtSample.Add(1)%rtSampleN() != 0 {
 		return

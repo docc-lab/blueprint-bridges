@@ -1,7 +1,7 @@
 package backend
 
-// Tomislav-RetCtx: the reflection-free carrier encoder must produce exactly the bytes the
-// encoding/json path produced, for every input the wrappers can hand it.
+// The reflection-free carrier encoder must produce exactly the bytes encoding/json produces, for every
+// input the wrappers can hand it.
 
 import (
 	"encoding/base64"

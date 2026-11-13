@@ -2,16 +2,14 @@ package backend
 
 import "fmt"
 
-// Tomislav-RetCtx (user 2026-11-06: assertions in the tracing instrumentation, simple comparisons only:
-// bounds checks and structural consistency).  The wrapper templates (plugins/opentelemetry/ir_ot_*.go)
-// and the interceptors and HTTP middleware (runtime/plugins/opentelemetry/interceptors) check
-// conditions that only a bug in the tracing code itself can break: the bounds of child ordinals and
-// counters, and the structure of what one traced service sends another (carriers, reverse contexts,
-// one value per header).  A broken one panics instead of letting the span processors build a wrong
-// trace; the experiment harness already fails a run on any pod restart.
+// Invariant checks for the tracing instrumentation: the wrapper templates, the gRPC interceptors and
+// the HTTP middleware check conditions that only a bug in the tracing code itself can break, such as
+// the bounds of child ordinals and counters and the structure of what one traced service sends
+// another (carriers, reverse contexts, one value per header). A broken one panics rather than let
+// the span processors build a wrong trace.
 //
-// Each check is one comparison on the hot path.  InvariantBroken is called only in the branch where
-// a check failed, so its arguments are only evaluated (and formatted) then.
+// Each check is one comparison on the hot path; InvariantBroken is only called when it fails, so its
+// arguments are only evaluated and formatted then.
 
 // InvariantError is the panic value of a broken tracing invariant.
 type InvariantError struct {

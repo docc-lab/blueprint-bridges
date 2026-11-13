@@ -98,8 +98,8 @@ func TestReturnedCheckpointRejectsMalformedLocation(t *testing.T) {
 	}
 }
 
-// Tomislav-RetCtx: splitting at one emission point must preserve each origin,
-// truss, and independent countdown, including zero and the maximum byte TTL.
+// Splitting at one emission point keeps each truss's origin and its own countdown, including TTL 0
+// and the largest one-byte TTL.
 func TestReverseTTLPartitionsEveryHop(t *testing.T) {
 	var pending string
 	for i, ttl := range []byte{0, 0, 2, 255} {

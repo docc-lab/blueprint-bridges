@@ -8,9 +8,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Tomislav-RetCtx: audit-only. Compares the reverse-path envelope against the
-// forward path's encoding (a single base64 of already-packed bytes) at the same
-// payload. Gated so it never runs in a normal `go test`.
+// Compares the cost of the reverse-path envelope with the forward path's encoding at the same payload.
+// Gated so it never runs in a normal `go test`:
 //   RETCTX_COST=1 go test ./runtime/core/backend -run TestRetCtxCost -bench BenchmarkRetCtx -benchtime 200000x
 
 var benchTruss = []byte{0x06, 0x06, 0x76, 0x86, 0xd5, 0x01, 0x45, 0xd8, 0xfc, 0x5a, 0x03, 0xd1,

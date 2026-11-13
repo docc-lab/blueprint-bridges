@@ -1,7 +1,7 @@
 package backend
 
-// Tomislav-RetCtx: the reverse context is raw packed bytes in the process and text only where a
-// carrier needs text (reversetruss_packed.go, RetCtxText / RetCtxFromText).
+// The reverse context is raw packed bytes in the process and text only where a carrier needs text
+// (RetCtxText / RetCtxFromText).
 
 import (
 	"encoding/base64"

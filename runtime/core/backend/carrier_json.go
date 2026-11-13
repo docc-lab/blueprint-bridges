@@ -1,18 +1,13 @@
 package backend
 
-// Tomislav-RetCtx: reflection-free encoding of the RPC trace carrier.
-//
-// Every generated OT client wrapper (plugins/opentelemetry/ir_ot_client.go) sends
+// Reflection-free encoding of the RPC trace carrier that the client wrappers send:
 //
 //	{"baggage":{...},"trace_ctx":{"TraceID":..,"SpanID":..,"TraceFlags":..,"TraceState":..,"Remote":..}}
 //
-// built by SpanContext.MarshalJSON and AddBaggageToTraceContext through encoding/json's
-// reflection path. In the deployed hotel frontend (CPU profile 2026-09-23, 12k rps) that was
-// 8.7 s of CPU per 30 s under vanilla and 12.2 s under the path bridge, whose baggage is
-// larger. The encoder below writes the same bytes directly: keys in encoding/json's sorted
-// order, strings escaped exactly as encoding/json escapes them (HTML-safe, invalid UTF-8 as
-// U+FFFD, U+2028/U+2029 escaped). carrier_json_test.go checks byte equality against the
-// reflection encoder.
+// encoding/json's reflection path is expensive per call, so this writes the same bytes directly:
+// keys in encoding/json's sorted order, strings escaped exactly as encoding/json escapes them
+// (HTML-safe, invalid UTF-8 as U+FFFD, U+2028/U+2029 escaped). carrier_json_test.go checks the
+// bytes against encoding/json.
 
 import (
 	"encoding/base64"
@@ -64,7 +59,7 @@ func appendJSONString(dst []byte, s string) []byte {
 			start = i
 			continue
 		}
-		if r == '\u2028' || r == '\u2029' { // Tomislav-RetCtx: escapes, not literals (line-splitting tools eat U+2028/9)
+		if r == '\u2028' || r == '\u2029' { // escaped: some line-splitting tools treat U+2028/9 as line breaks
 			dst = append(dst, s[start:i]...)
 			dst = append(dst, '\\', 'u', '2', '0', '2', hexDigits[r&0xF])
 			i += size
@@ -102,13 +97,11 @@ func appendJSONStringMap(dst []byte, m map[string]string) []byte {
 }
 
 // splitBinaryBaggage separates baggage values that are not valid UTF-8 from the rest.
-// Tomislav-RetCtx: the bridges keep their propagation state (`_br`) in the baggage as raw bytes
-// (runtime/plugins/otelcol/pack.go, propBR): the gRPC interceptors' binary carrier takes them as
-// they are, but a JSON string cannot hold them (encoding/json replaces such bytes with U+FFFD).
-// So in the JSON carrier they travel base64 (RawURL) in a separate "baggage_bin" object, which is
-// only present when there are such values: every other carrier is byte for byte what it was.
-// text is baggage itself when nothing is binary (no copy); bin is nil then.  Keys are assumed to
-// be text (they are names chosen in code).
+// The bridges keep their `_br` in the baggage as raw bytes, which a JSON string cannot hold
+// (encoding/json would replace them with U+FFFD). In the JSON carrier such values travel as base64
+// (RawURL) in a separate "baggage_bin" object, present only when needed, so other carriers are
+// unchanged. text is baggage itself (no copy) when nothing is binary; bin is nil then. Keys are
+// assumed to be text.
 func splitBinaryBaggage(baggage map[string]string) (text, bin map[string]string) {
 	for _, v := range baggage {
 		if !utf8.ValidString(v) {
