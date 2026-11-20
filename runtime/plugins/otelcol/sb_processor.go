@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -182,15 +180,10 @@ func NewStructuralBridgeProcessor(ctx context.Context, agentEndpoint string, con
 
 	slog.Info("🔵 About to fetch full config")
 	if err := processor.fetchFullConfig(ctx); err != nil {
-		if errors.Is(err, errInvalidCheckpointRange) || errors.Is(err, errInvalidReversePolicy) {
-			_ = conn.close()
-			return nil, err
-		}
-		slog.Error("❌ Failed to fetch full config", "error", err)
-		slog.Warn("⚠️ Continuing with empty config map")
-	} else {
-		slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
+		_ = conn.close()
+		return nil, err
 	}
+	slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
 
 	processor.wg.Add(1)
 	go processor.processEvents()
@@ -233,6 +226,11 @@ func (p *StructuralBridgeProcessor) logMetrics() {
 	checkPriorityCounts("sent", cpSent, lpSent, sent)
 	checkPriorityCounts("dropped", cpDropped, lpDropped, dropped)
 	checkPriorityCounts("received", cpReceived, lpReceived, received)
+	// The configuration in force goes on the line too; the experiment runner checks it before
+	// every load run (utils/run_dsb_sn_nw.py, check_sdk_config).
+	p.configLock.RLock()
+	cpd, rng := p.checkpointDistance, p.checkpointRange
+	p.configLock.RUnlock()
 	slog.Info("sb_processor_metrics",
 		"spans_received", received,
 		"spans_flushed", flushed,
@@ -255,6 +253,9 @@ func (p *StructuralBridgeProcessor) logMetrics() {
 		"lp_buffer_depth", lpDepth,
 		"dee_dropped", atomic.LoadInt64(&p.deeDropped),
 		"dee_chan_depth", len(p.delayedEndEventsChan),
+		"cpd", cpd,
+		"cpd_min", rng.min,
+		"cpd_max", rng.max,
 	)
 	// The retry gauges go on a line of their own.
 	sdkRetry.logMetrics()
@@ -736,7 +737,7 @@ func (p *StructuralBridgeProcessor) parseCheckpointDistance(config map[string]in
 
 // fetchFullConfig reads the parameters from the config discovery endpoint and applies them.
 func (p *StructuralBridgeProcessor) fetchFullConfig(ctx context.Context) error {
-	config, err := p.fetchFullConfigFromEndpointWithRetries(ctx)
+	config, err := discoverConfig(ctx, p.httpClient, p.getConfigDiscoveryEndpoint())
 	if err != nil {
 		return fmt.Errorf("failed to fetch full config: %w", err)
 	}
@@ -776,76 +777,6 @@ func (p *StructuralBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 		"reverse_policy", policy.mode, "reverse_probability", policy.probability,
 		"reverse_passthrough", policy.passthrough)
 	return nil
-}
-
-// fetchFullConfigFromEndpointWithRetries fetches the config, retrying once a second for up to a
-// minute while the collector is not up yet.
-func (p *StructuralBridgeProcessor) fetchFullConfigFromEndpointWithRetries(ctx context.Context) (map[string]interface{}, error) {
-	configDiscoveryEndpoint := p.getConfigDiscoveryEndpoint()
-	url := fmt.Sprintf("http://%s/getFullConfig", configDiscoveryEndpoint)
-
-	for attempt := 1; attempt <= 60; attempt++ {
-		slog.Debug("Attempting config discovery", "attempt", attempt, "endpoint", url)
-
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-		}
-
-		resp, err := p.httpClient.Do(req)
-		if err != nil {
-			slog.Debug("Config discovery attempt failed, will retry", "attempt", attempt, "error", err)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to make HTTP request after %d attempts: %w", attempt, err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			slog.Debug("Config discovery endpoint returned non-OK status, will retry", "attempt", attempt, "status", resp.StatusCode)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("config discovery endpoint returned status %d after %d attempts", resp.StatusCode, attempt)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			slog.Debug("Failed to read response body, will retry", "attempt", attempt, "error", err)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to read response body after %d attempts: %w", attempt, err)
-		}
-
-		var configResp ConfigResponse
-		if err := json.Unmarshal(body, &configResp); err != nil {
-			slog.Debug("Failed to parse config response, will retry", "attempt", attempt, "error", err)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to parse config response after %d attempts: %w", attempt, err)
-		}
-
-		if configResp.Config == nil {
-			slog.Debug("Empty config in response, will retry", "attempt", attempt)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("empty config in response after %d attempts", attempt)
-		}
-
-		slog.Info("Config discovery successful", "attempt", attempt, "config_keys", len(configResp.Config))
-		return configResp.Config, nil
-	}
-
-	return nil, fmt.Errorf("config discovery failed after 60 attempts")
 }
 
 // getConfigMap returns a copy of the config map.

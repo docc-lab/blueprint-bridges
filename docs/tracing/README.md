@@ -136,6 +136,7 @@ its own export to the collector.
 | `defs.go` | 75 | baggage keys, ancestry modes, Bloom filter defaults, the collector's config response type |
 | `pack.go` | 402 | the packed `_br` formats of the bridges; `encodeBR`/`decodeBR` (text, for attributes) and `propBR`/`parsePropBR` (raw, for baggage) |
 | `checkpoint_distance.go` | 101 | `checkpointRange`: the CPD range discovered from the collector; the forward TTL byte |
+| `config_discovery.go` | 70 | `discoverConfig`: reads the bridge configuration from the node agent's `/getFullConfig`, retrying until the agent answers |
 | `checkpoint_window.go` | 164 | the ranged PB/CGPB window: per-distance Bloom geometry, packing and unpacking of the window |
 | `wire_state.go` | 139 | `bridgeWires`: per-span bridge state kept beside the span instead of in its attributes (emit payload, depth, outgoing `_br`) |
 | `vanilla_processor.go` | 718 | the vanilla processor; also defines export settings other processors use (deadline `OTLP_DEADLINE_MS`, `OTLP_RETRY`, span padding `SPAN_PADDING_BYTES`) |
@@ -332,7 +333,9 @@ README.md`, Step 2d).
 | `POD_IP`, `HOST_IP` | `otelcol/realtime_processor.go` | how the real-time processor finds its own IP |
 
 The bridge configuration itself (CPD range, reverse policy) is not an environment variable: the
-processors fetch it from the collector's config endpoint at startup.
+processors fetch it from the collector's config endpoint at startup. A processor never starts
+without it: its constructor waits, with no attempt limit, until the node agent answers, so a service
+whose agent is not up yet does not listen (and is not ready) either.
 
 ## 10. Unused code and other things a reviewer should know
 

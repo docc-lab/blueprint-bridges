@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -135,12 +134,10 @@ func NewExactBridgeProcessor(ctx context.Context, agentEndpoint string, configDi
 	// Fetch full config from config discovery endpoint
 	slog.Info("🔵 About to fetch full config")
 	if err := processor.fetchFullConfig(ctx); err != nil {
-		slog.Error("❌ Failed to fetch full config", "error", err)
-		// Don't fail initialization if config fetch fails - continue with empty config
-		slog.Warn("⚠️ Continuing with empty config map")
-	} else {
-		slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
+		_ = client.Stop(context.Background())
+		return nil, err
 	}
+	slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
 
 	// Start background worker for batch export
 	processor.wg.Add(1)
@@ -761,7 +758,7 @@ func (p *ExactBridgeProcessor) parseCheckpointDistance(config map[string]interfa
 // fetchFullConfig fetches the full config from the config discovery endpoint
 func (p *ExactBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 	// Try to fetch config from the discovery endpoint with retries
-	config, err := p.fetchFullConfigFromEndpointWithRetries(ctx)
+	config, err := discoverConfig(ctx, p.httpClient, p.getConfigDiscoveryEndpoint())
 	if err != nil {
 		return fmt.Errorf("failed to fetch full config: %w", err)
 	}
@@ -786,78 +783,6 @@ func (p *ExactBridgeProcessor) fetchFullConfig(ctx context.Context) error {
 		"config_keys", len(config),
 		"checkpoint_distance", cpd)
 	return nil
-}
-
-// fetchFullConfigFromEndpointWithRetries fetches config from the discovery endpoint with retries
-func (p *ExactBridgeProcessor) fetchFullConfigFromEndpointWithRetries(ctx context.Context) (map[string]interface{}, error) {
-	configDiscoveryEndpoint := p.getConfigDiscoveryEndpoint()
-	url := fmt.Sprintf("http://%s/getFullConfig", configDiscoveryEndpoint)
-
-	// Retry loop with 1-second intervals
-	for attempt := 1; attempt <= 60; attempt++ { // Max 60 attempts (60 seconds)
-		slog.Debug("Attempting config discovery", "attempt", attempt, "endpoint", url)
-
-		// Create a new request for each attempt
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-		}
-
-		resp, err := p.httpClient.Do(req)
-		if err != nil {
-			slog.Debug("Config discovery attempt failed, will retry", "attempt", attempt, "error", err)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to make HTTP request after %d attempts: %w", attempt, err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			slog.Debug("Config discovery endpoint returned non-OK status, will retry", "attempt", attempt, "status", resp.StatusCode)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("config discovery endpoint returned status %d after %d attempts", resp.StatusCode, attempt)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			slog.Debug("Failed to read response body, will retry", "attempt", attempt, "error", err)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to read response body after %d attempts: %w", attempt, err)
-		}
-
-		var configResp ConfigResponse
-		if err := json.Unmarshal(body, &configResp); err != nil {
-			slog.Debug("Failed to parse config response, will retry", "attempt", attempt, "error", err)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to parse config response after %d attempts: %w", attempt, err)
-		}
-
-		if configResp.Config == nil {
-			slog.Debug("Empty config in response, will retry", "attempt", attempt)
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("empty config in response after %d attempts", attempt)
-		}
-
-		// Success! Return the config
-		slog.Info("Config discovery successful", "attempt", attempt, "config_keys", len(configResp.Config))
-		return configResp.Config, nil
-	}
-
-	return nil, fmt.Errorf("config discovery failed after 60 attempts")
 }
 
 // getConfigMap returns the config map, with thread-safe access

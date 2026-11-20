@@ -3,9 +3,7 @@ package otelcol
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	mathrand "math/rand/v2"
 	"net/http"
@@ -161,11 +159,10 @@ func NewRandomCheckpointProcessor(ctx context.Context, agentEndpoint string, con
 
 	slog.Info("🔵 About to fetch full config")
 	if err := processor.fetchFullConfig(ctx); err != nil {
-		slog.Error("❌ Failed to fetch full config", "error", err)
-		slog.Warn("⚠️ Continuing with empty config map (cpd defaults to 1)")
-	} else {
-		slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
+		_ = client.Stop(context.Background())
+		return nil, err
 	}
+	slog.Info("🟢 Successfully fetched full config", "config_keys", len(processor.configMap))
 
 	// Precompute the checkpoint breadcrumb buffer now that cpd is known and
 	// BEFORE any OnEnd can run (background goroutines start below; the SDK only
@@ -692,7 +689,7 @@ func (p *RandomCheckpointProcessor) parseCheckpointDistance(config map[string]in
 }
 
 func (p *RandomCheckpointProcessor) fetchFullConfig(ctx context.Context) error {
-	config, err := p.fetchFullConfigFromEndpointWithRetries(ctx)
+	config, err := discoverConfig(ctx, p.httpClient, p.getConfigDiscoveryEndpoint())
 	if err != nil {
 		return fmt.Errorf("failed to fetch full config: %w", err)
 	}
@@ -706,58 +703,6 @@ func (p *RandomCheckpointProcessor) fetchFullConfig(ctx context.Context) error {
 		"checkpoint_distance", cpd,
 		"hp_probability", 1.0/float64(cpd))
 	return nil
-}
-
-func (p *RandomCheckpointProcessor) fetchFullConfigFromEndpointWithRetries(ctx context.Context) (map[string]interface{}, error) {
-	url := fmt.Sprintf("http://%s/getFullConfig", p.getConfigDiscoveryEndpoint())
-	for attempt := 1; attempt <= 60; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-		}
-		resp, err := p.httpClient.Do(req)
-		if err != nil {
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to make HTTP request after %d attempts: %w", attempt, err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("config discovery returned status %d after %d attempts", resp.StatusCode, attempt)
-		}
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to read response body after %d attempts: %w", attempt, err)
-		}
-		var configResp ConfigResponse
-		if err := json.Unmarshal(body, &configResp); err != nil {
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("failed to parse config response after %d attempts: %w", attempt, err)
-		}
-		if configResp.Config == nil {
-			if attempt < 30 {
-				time.Sleep(1 * time.Second)
-				continue
-			}
-			return nil, fmt.Errorf("empty config in response after %d attempts", attempt)
-		}
-		slog.Info("Config discovery successful", "attempt", attempt, "config_keys", len(configResp.Config))
-		return configResp.Config, nil
-	}
-	return nil, fmt.Errorf("config discovery failed after 60 attempts")
 }
 
 func (p *RandomCheckpointProcessor) getConfigMap() map[string]interface{} {

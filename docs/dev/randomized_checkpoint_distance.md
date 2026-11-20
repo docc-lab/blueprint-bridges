@@ -14,7 +14,8 @@ receivers:
 ```
 
 Keep `configdiscovery` in the collector's existing logs/config pipeline. The SDK
-fetches `/getFullConfig` at startup, as it does for fixed `cpd`. Both bounds are
+fetches `/getFullConfig` at startup, as it does for fixed `cpd`, and waits for the
+collector if it is not up yet; it never runs without the configuration. Both bounds are
 required, and `1 <= cpd_min <= cpd_max <= 256`. Bounds take precedence over a
 legacy `cpd` value if all three keys are supplied in YAML. The deployment CLI
 requires choosing either `--cpd` or the two range flags.
