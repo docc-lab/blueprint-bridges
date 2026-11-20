@@ -22,7 +22,8 @@ from prepare_dsb_sn_nw import BRIDGES, COLLECTOR_PROFILES, COLLECTOR_RESOURCES, 
 from dsb_apps import APPS, app_name, app_of, entry_url  # Tomislav-RetCtx: per-application constants
 import dsb_hotel_seed  # Tomislav-RetCtx (2026-10-29): larger hotel dataset seeded before the services start
 from run_dsb_sn_e2e import (now, kube, get_http, snapshot, counter_deltas, run_wrk, teardown, ready, SEED,
-                            sample_traces, capture_traces, settle_trace_samples)
+                            sample_traces, capture_traces, settle_trace_samples, log_metrics)
+from concurrent.futures import ThreadPoolExecutor
 
 CONNECTION_CAP = 2500
 
@@ -173,8 +174,8 @@ def knee_windows(case, directory, plan, measured, seed, state, status_path):
             n += 1
             state.update(stage='knee-windows', offered_rps=rate, window=n, updated=now()); write_json(status_path, state)
             window = point / f'window-{n}'
-            result = run_wrk(window, rate, plan['seconds_per_rate'], seed + 100 * n, connections=connections_for(rate), workload=plan.get('workload'),
-                             app=app_name(case))
+            result = run_load(case, window, rate, plan['seconds_per_rate'], seed + 100 * n, connections=connections_for(rate), workload=plan.get('workload'),
+                                   app=app_name(case))
             write_json(window / 'result.json', result)
             wins.append(spectrum(window / 'wrk.stdout'))
             time.sleep(cfg.get('gap_seconds', 8))
@@ -422,9 +423,79 @@ def deploy(case, directory):
     manifest.write_bytes(source.read_bytes())
     kube(namespace, 'apply', '-f', str(manifest), timeout=180)
     verify_deployment(case, directory)
+    check_sdk_discovery(case, directory)
     if case.get('backend_tuning') and case.get('collector_profile') != 'sink':
         tune_elasticsearch(case, directory)
     check_initialized(case, directory)
+
+
+# A bridge SDK reads its checkpoint configuration from its node's agent while its service starts, and waits for the
+# agent if it is not up yet (runtime/plugins/otelcol/config_discovery.go); its service listens, and so is ready, only
+# after that. Once the deployment is ready, every bridge service's log must show the fetched configuration.
+DISCOVERY_OK, DISCOVERY_FAILED = 'Successfully fetched full config', 'Failed to fetch full config'
+
+
+def sdk_states(namespace, variant, timeout=120):
+    """Discovery outcome of every running bridge service pod (terminating pods excluded): ok, failed, or undecided if
+    its SDK has logged neither line by the deadline."""
+    deadline = time.monotonic() + timeout
+    while True:
+        pods = json.loads(kube(namespace, 'get', 'pods', '-l', f'retctx-e2e={variant}', '-o', 'json'))['items']
+        states = {}
+        for pod in pods:
+            name = pod['metadata']['name']
+            if '-service-' not in name or pod['metadata'].get('deletionTimestamp'):
+                continue
+            state = 'undecided'
+            if pod['status'].get('phase') == 'Running':
+                log = kube(namespace, 'logs', name, timeout=60)
+                state = 'ok' if DISCOVERY_OK in log else ('failed' if DISCOVERY_FAILED in log else 'undecided')
+            states[name] = state
+        if 'undecided' not in states.values() or time.monotonic() > deadline:
+            return states
+        time.sleep(3)
+
+
+def check_sdk_discovery(case, directory):
+    if case['kind'] not in BRIDGES:
+        return
+    states = sdk_states(case['namespace'], case['variant'])
+    write_json(directory / 'sdk-discovery.json', {'time': now(), 'services': states})
+    bad = {name: state for name, state in states.items() if state != 'ok'}
+    assert not bad, f'bridge SDKs without their configuration: {bad}'
+
+
+def sdk_expected(case):
+    """The checkpoint configuration every bridge SDK must run with: the agents' discovery map."""
+    discovery = case.get('discovery') or app_of(case)['discovery']
+    if 'cpd_min' in discovery:
+        return {'cpd_min': discovery['cpd_min'], 'cpd_max': discovery['cpd_max']}
+    return {'cpd': discovery['cpd'], 'cpd_min': 0, 'cpd_max': 0}
+
+
+def check_sdk_config(case):
+    """Before any load: every bridge SDK's latest metrics line (logged every second, with the configuration in
+    force) must carry the agents' checkpoint configuration. This also covers pods replaced after the deployment."""
+    if case['kind'] not in BRIDGES:
+        return
+    want = sdk_expected(case)
+    pods = json.loads(kube(case['namespace'], 'get', 'pods', '-l', f'retctx-e2e={case["variant"]}', '-o', 'json'))['items']
+    # The node agents carry BRIDGE_KIND too, but the SDK runs in the services (as in sdk_states).
+    names = [p['metadata']['name'] for p in pods if '-service-' in p['metadata']['name']
+             and not p['metadata'].get('deletionTimestamp')
+             and any(e.get('name') == 'BRIDGE_KIND' for c in p['spec']['containers'] for e in c.get('env', []))]
+    assert names, 'no bridge SDK pods'
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        logs = dict(zip(names, pool.map(lambda n: kube(case['namespace'], 'logs', n, '--since=30s', timeout=60), names)))
+    got = {name: {k: log_metrics(text).get('_processor_metrics', {}).get(k) for k in want} for name, text in logs.items()}
+    bad = {name: values for name, values in got.items() if values != want}
+    assert not bad, f'bridge SDKs without the agents\' configuration {want}: {bad}'
+
+
+def run_load(case, *args, **kwargs):
+    """Every load run (warm-ups, pre-fill, probes, measured points) goes through here."""
+    check_sdk_config(case)
+    return run_wrk(*args, **kwargs)
 
 
 def collector_totals(snap):
@@ -579,8 +650,8 @@ def measure_point(case, point, rate, seconds, seed, plan, **extra):
     """One fixed-rate point measured like a ramp point (telemetry snapshot before and after, result.json)."""
     point.mkdir(parents=True)
     before = snapshot(case['namespace'], case['variant'], point / 'before')
-    result = run_wrk(point, rate, seconds, seed, connections=connections_for(rate), app=app_name(case),
-                     workload=plan.get('workload'))
+    result = run_load(case, point, rate, seconds, seed, connections=connections_for(rate), app=app_name(case),
+                           workload=plan.get('workload'))
     after = snapshot(case['namespace'], case['variant'], point / 'after')
     result['collector_deltas'], result['counter_resets'] = counter_deltas(before, after)
     result['snapshot_errors'] = before['errors'] + after['errors']
@@ -602,8 +673,8 @@ def prefill(case, directory, seed):
     for attempt in range(cfg['max_top_ups'] + 1):
         sub = directory / ('prefill' if attempt == 0 else f'prefill-topup-{attempt}')
         length = seconds if attempt == 0 else cfg['top_up_seconds']
-        result = run_wrk(sub, cfg['rate'], length, seed + 900 + attempt, connections=connections_for(cfg['rate']),
-                         app=app_name(case), workload=None)
+        result = run_load(case, sub, cfg['rate'], length, seed + 900 + attempt, connections=connections_for(cfg['rate']),
+                               app=app_name(case), workload=None)
         state = app_state(case, sub / 'app-state.json', strict=True)
         per_doc = state['usertimeline']['posts_per_doc'] or {}
         fills.append({'directory': sub.name, 'rate': cfg['rate'], 'seconds': length,
@@ -645,12 +716,12 @@ def setup(case, directory, plan, seed, mode, state, status_path):
         # 10 s calibration can leave the settle without recorded samples (hotel at 65 ms mean latency),
         # which is not a failure either.
         try:
-            run_wrk(directory / 'warmup-settle', 10, 20, seed, connections=plan['warmup_connections'],
-                    app=app_name(case), workload=plan.get('workload'))
+            run_load(case, directory / 'warmup-settle', 10, 20, seed, connections=plan['warmup_connections'],
+                          app=app_name(case), workload=plan.get('workload'))
         except ValueError as exc:
             write_json(directory / 'warmup-settle' / 'unparsed.json', {'error': str(exc), 'at': now()})
-        warm = run_wrk(directory / 'warmup', plan['warmup_rps'], plan['warmup_seconds'], seed,
-                       connections=plan['warmup_connections'], app=app_name(case), workload=plan.get('workload'))
+        warm = run_load(case, directory / 'warmup', plan['warmup_rps'], plan['warmup_seconds'], seed,
+                             connections=plan['warmup_connections'], app=app_name(case), workload=plan.get('workload'))
         assert warm['non_2xx_3xx'] == 0 and not any(warm['socket_errors'].values()), warm
         if case.get('backend_tuning') and case['kind'] != 'nt' \
                 and case.get('collector_profile') != 'sink':
@@ -735,9 +806,9 @@ def campaign(root, mode, skip_smoke=False):
                     generator = None if mode == 'smoke' else plan.get('generator')
                     peak = rate * (generator or {}).get('peak_multiplier', 1.0)
                     connections = 10 if mode == 'smoke' else connections_for(peak)
-                    result = run_wrk(point, rate, 30 if mode == 'smoke' else plan['seconds_per_rate'], seed,
-                                     connections=connections, generator=generator, app=app_name(case),
-                                     workload=plan.get('workload'))
+                    result = run_load(case, point, rate, 30 if mode == 'smoke' else plan['seconds_per_rate'], seed,
+                                           connections=connections, generator=generator, app=app_name(case),
+                                           workload=plan.get('workload'))
                     after = snapshot(case['namespace'], case['variant'], point / 'after')
                     result['collector_deltas'], result['counter_resets'] = counter_deltas(before, after)
                     result['snapshot_errors'] = before['errors'] + after['errors']
@@ -789,9 +860,9 @@ def campaign(root, mode, skip_smoke=False):
                     state.update(stage='point-warmup', offered_rps=rate, updated=now()); write_json(status_path, state)
                     generator = plan.get('generator')
                     peak = rate * (generator or {}).get('peak_multiplier', 1.0)
-                    run_wrk(prep / 'point-warmup', rate, fresh['warmup_seconds'], seed + 3000,
-                            connections=connections_for(peak), generator=generator, app=app_name(case),
-                            workload=plan.get('workload'))
+                    run_load(case, prep / 'point-warmup', rate, fresh['warmup_seconds'], seed + 3000,
+                                  connections=connections_for(peak), generator=generator, app=app_name(case),
+                                  workload=plan.get('workload'))
                     if app_of(case).get('prefill'):
                         app_state(case, prep / 'point-warmup' / 'app-state.json')
                     result = climb(directory, [rate], seed, None, first)[0]
